@@ -348,15 +348,9 @@ def finalize_model_df(df: DataFrame, keep_cols: list[str], target_cols: list[str
 def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
     """FeatureLookups for rolling stats from ft_*_daily_* tables.
 
-    Architecture:
-    - Rolling stats (ft_*_daily_*) → FeatureLookup with PIT on event_date
-    - Timezone/geo/time/on-demand features → already in base df from enriched()
-      (NOT re-fetched via FeatureLookup → simpler feature_spec,
-       avoids SDK bug with dict lookup_key + rename_outputs)
-
-    days_since_last_event handling:
-    - taxi_out/taxi_in: list-key → rename_outputs to _dep/_arr
-    - route/stand: excluded via feature_names (avoids dict+rename SDK bug)
+    Only tables with simple list-form lookup_key are included here.
+    Stand tables (which need dict-form key mapping) are joined manually
+    in _join_stand_features() to avoid SDK bug (unhashable type: dict).
     """
     ts_key = settings.FS_TIMESTAMP_KEY  # event_date
 
@@ -366,52 +360,63 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
         c for c in spark.read.table(settings.FT_ROUTE_DAILY_STATS_TABLE).columns if c not in route_exclude
     ]
 
-    # Stand: explicit feature_names (all except PK + days_since_last_event)
-    _stand_exclude = {"stand_id", "event_date", "days_since_last_event"}
-    stand_out_features = [
-        c for c in spark.read.table(settings.FT_STAND_DAILY_OUT_TABLE).columns if c not in _stand_exclude
-    ]
-    stand_in_features = [
-        c for c in spark.read.table(settings.FT_STAND_DAILY_IN_TABLE).columns if c not in _stand_exclude
-    ]
-
     return [
-        # ===== Airport taxi out (list key → rename_outputs OK) =====
+        # ===== Airport taxi out (PK: dep_ap_sched, event_date TIMESERIES) =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_OUT),
             timestamp_lookup_key=ts_key,
             rename_outputs={"days_since_last_event": "days_since_last_event_dep"},
         ),
-        # ===== Route (list key → exclude days_since via feature_names) =====
+        # ===== Route (PK: route_id, event_date TIMESERIES) =====
         FeatureLookup(
             table_name=settings.FT_ROUTE_DAILY_STATS_TABLE,
             lookup_key=list(settings.PK_FT_ROUTE),
             feature_names=route_features,
             timestamp_lookup_key=ts_key,
         ),
-        # ===== Airport taxi in (list key → rename_outputs OK) =====
+        # ===== Airport taxi in (PK: arr_ap_sched, event_date TIMESERIES) =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_IN_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_IN),
             timestamp_lookup_key=ts_key,
             rename_outputs={"days_since_last_event": "days_since_last_event_arr"},
         ),
-        # ===== Stand out (DICT key → feature_names, NO rename_outputs) =====
-        FeatureLookup(
-            table_name=settings.FT_STAND_DAILY_OUT_TABLE,
-            lookup_key={"stand_id": "stand_id_out"},
-            feature_names=stand_out_features,
-            timestamp_lookup_key=ts_key,
-        ),
-        # ===== Stand in (DICT key → feature_names, NO rename_outputs) =====
-        FeatureLookup(
-            table_name=settings.FT_STAND_DAILY_IN_TABLE,
-            lookup_key={"stand_id": "stand_id_in"},
-            feature_names=stand_in_features,
-            timestamp_lookup_key=ts_key,
-        ),
     ]
+
+
+def _join_stand_features(df: DataFrame, spark, settings: FlightDelaySettings) -> DataFrame:
+    """Manual PIT join for stand tables (avoids SDK dict lookup_key bug).
+
+    Joins ft_stand_daily_out on (stand_id_out, event_date) and
+    ft_stand_daily_in on (stand_id_in, event_date) using asof join logic:
+    feature event_date <= base event_date (latest available before flight).
+    """
+    from pyspark.sql import Window
+
+    def _pit_join_stand(base_df, stand_table, base_stand_col, suffix):
+        """PIT join: get latest stand features where stand.event_date <= base.event_date."""
+        stand_df = spark.read.table(stand_table)
+
+        # Exclude PK and days_since from stand features
+        feature_cols = [c for c in stand_df.columns if c not in ("stand_id", "event_date", "days_since_last_event")]
+
+        # Join on stand_id match + stand.event_date <= base.event_date
+        joined = base_df.join(
+            stand_df.select("stand_id", "event_date", *feature_cols).withColumnRenamed("event_date", "_stand_event_date"),
+            on=(F.col(base_stand_col) == F.col("stand_id")) & (F.col("_stand_event_date") <= F.col("event_date")),
+            how="left",
+        )
+
+        # Keep only the LATEST stand row (max _stand_event_date per base row)
+        w = Window.partitionBy(base_df.columns).orderBy(F.col("_stand_event_date").desc())
+        joined = joined.withColumn("_rn", F.row_number().over(w)).filter(F.col("_rn") == 1).drop("_rn", "_stand_event_date", "stand_id")
+
+        return joined
+
+    df = _pit_join_stand(df, settings.FT_STAND_DAILY_OUT_TABLE, "stand_id_out", "out")
+    df = _pit_join_stand(df, settings.FT_STAND_DAILY_IN_TABLE, "stand_id_in", "in")
+    return df
 
 
 _FS_LOOKUP_HELPER_COLS = ["route_id", "stand_id_out", "stand_id_in"]
@@ -445,15 +450,19 @@ def _base_training_df(spark, settings: FlightDelaySettings) -> DataFrame:
 
 
 def _create_fs_training_set(fe: FeatureEngineeringClient, base_df: DataFrame, settings: FlightDelaySettings, spark):
-    # Drop columns that FeatureLookup will re-add (avoid duplicate output names)
-    cols_to_drop = [c for c in _FS_COLS_TO_DROP_FROM_BASE if c in base_df.columns]
-    clean_df = base_df.drop(*cols_to_drop) if cols_to_drop else base_df
-    return fe.create_training_set(
-        df=clean_df,
+    # Step 1: FeatureLookup for airport/route tables (list-key, no SDK issues)
+    training_set = fe.create_training_set(
+        df=base_df,
         feature_lookups=_build_feature_lookups(spark, settings),
         label=None,
         exclude_columns=_FS_LOOKUP_HELPER_COLS,
     )
+    return training_set
+
+
+def _add_stand_features_post_lookup(df: DataFrame, spark, settings: FlightDelaySettings) -> DataFrame:
+    """Add stand features via manual PIT join (post create_training_set)."""
+    return _join_stand_features(df, spark, settings)
 
 
 def _assert_lookup_contract(base_df: DataFrame, settings: FlightDelaySettings) -> None:

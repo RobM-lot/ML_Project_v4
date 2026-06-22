@@ -495,6 +495,13 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
 
 
 _FS_LOOKUP_HELPER_COLS = ["route_id", "stand_id_out", "stand_id_in"]
+
+# Columns that exist in base df (from enriched()) but are RE-ADDED by FeatureLookup
+# (ft_airport_timezone). Must be dropped from base df to avoid duplicate output names.
+_FS_COLS_TO_DROP_FROM_BASE = [
+    "dep_utc_offset_min", "arr_utc_offset_min",
+    "dep_lat", "dep_lon", "arr_lat", "arr_lon",
+]
 _FS_REQUIRED_LOOKUP_KEYS = ["dep_ap_sched", "route_id", "arr_ap_sched", "stand_id_out", "stand_id_in"]
 
 
@@ -518,8 +525,11 @@ def _base_training_df(spark, settings: FlightDelaySettings) -> DataFrame:
 
 
 def _create_fs_training_set(fe: FeatureEngineeringClient, base_df: DataFrame, settings: FlightDelaySettings, spark):
+    # Drop columns that FeatureLookup will re-add (avoid duplicate output names)
+    cols_to_drop = [c for c in _FS_COLS_TO_DROP_FROM_BASE if c in base_df.columns]
+    clean_df = base_df.drop(*cols_to_drop) if cols_to_drop else base_df
     return fe.create_training_set(
-        df=base_df,
+        df=clean_df,
         feature_lookups=_build_feature_lookups(spark, settings),
         label=None,
         exclude_columns=_FS_LOOKUP_HELPER_COLS,

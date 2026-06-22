@@ -499,8 +499,17 @@ _FS_LOOKUP_HELPER_COLS = ["route_id", "stand_id_out", "stand_id_in"]
 # Columns that exist in base df (from enriched()) but are RE-ADDED by FeatureLookup
 # (ft_airport_timezone). Must be dropped from base df to avoid duplicate output names.
 _FS_COLS_TO_DROP_FROM_BASE = [
+    # Columns re-provided by FeatureLookup (ft_airport_timezone)
     "dep_utc_offset_min", "arr_utc_offset_min",
     "dep_lat", "dep_lon", "arr_lat", "arr_lon",
+    # Columns re-provided by FeatureFunction (on-demand)
+    "distance_km", "is_eastbound",
+    "local_hour_dep", "local_hour_arr", "local_dow_dep", "local_dow_arr", "month",
+    "sin_local_hour_dep", "cos_local_hour_dep",
+    "sin_local_hour_arr", "cos_local_hour_arr",
+    "sin_local_dow_dep", "cos_local_dow_dep",
+    "sin_local_dow_arr", "cos_local_dow_arr",
+    "sin_month", "cos_month",
 ]
 _FS_REQUIRED_LOOKUP_KEYS = ["dep_ap_sched", "route_id", "arr_ap_sched", "stand_id_out", "stand_id_in"]
 

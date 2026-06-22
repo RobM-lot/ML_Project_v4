@@ -1,0 +1,3 @@
+# Add only packages that are NOT already available in the chosen Databricks Runtime.
+# Keep this file minimal.
+# Pin versions only after smoke validation on DBR 17.3 LTS ML.

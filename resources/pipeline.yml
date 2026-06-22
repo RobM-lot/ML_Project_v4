@@ -1,0 +1,32 @@
+resources:
+  pipelines:
+    pipeline_ml_feature_store:
+      name: "ml_feature_store"
+      development: true
+      root_path: ${workspace.root_path}
+      libraries:
+        - glob:
+            include: ../src/pipeline/**
+            
+      catalog: ${var.silver_catalog}
+      schema: ${var.silver_schema}
+
+      configuration:
+        ml.source_catalog: ${var.source_catalog}
+        ml.source_schema: ${var.source_schema}
+        ml.silver_catalog: ${var.silver_catalog}
+        ml.silver_schema: ${var.silver_schema}
+        ml.history_start: "2023-07-01"
+        ml.data_cutoff_date: "2027-01-01"
+        spark.sql.session.timeZone: "UTC"
+      
+      serverless: true
+      channel: PREVIEW
+      
+      notifications:
+        - email_recipients:
+            - r.matysiak@lot.pl
+          alerts:
+            - on-update-failure
+            - on-update-fatal-failure
+            - on-flow-failure

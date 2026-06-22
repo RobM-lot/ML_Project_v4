@@ -1,0 +1,72 @@
+bundle:
+  name: ML_Project_v4
+
+include:
+  - resources/*.yml
+
+variables:
+  existing_cluster_id:
+    default: "0204-144038-zpix5qya"
+
+  runtime_env:
+    default: "dev"
+
+  source_catalog:
+    default: "panda_silver_prod"
+
+  source_schema:
+    default: "occ_ops"
+
+  silver_catalog:
+    default: "panda_silver_dev"
+
+  silver_schema:
+    default: "ml_ops"
+
+  gold_catalog:
+    default: "panda_gold_dev"
+
+  gold_schema:
+    default: "ml_ops"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      runtime_env: "dev"
+      source_catalog: "panda_silver_prod"
+      source_schema: "occ_ops"
+      silver_catalog: "panda_silver_dev"
+      silver_schema: "ml_ops"
+      gold_catalog: "panda_gold_dev"
+      gold_schema: "ml_ops"
+    workspace:
+      host: https://adb-5711108594958773.13.azuredatabricks.net/
+      root_path: /Workspace/Users/30002818@lot.pl/.bundle/${bundle.name}/${bundle.target}
+    permissions:
+      - group_name: databricks-panda-data-engineers
+        level: CAN_MANAGE
+      - user_name: 30002818@lot.pl
+        level: CAN_MANAGE
+
+  prod:
+    mode: production
+    variables:
+      runtime_env: "prod"
+      source_catalog: "panda_silver_prod"
+      source_schema: "occ_ops"
+      silver_catalog: "panda_silver_prod"
+      silver_schema: "__TODO_PROD_SILVER_SCHEMA__"
+      gold_catalog: "panda_gold_prod"
+      gold_schema: "__TODO_PROD_GOLD_SCHEMA__"
+    workspace:
+      host: https://adb-4923213703602775.15.azuredatabricks.net/
+      root_path: /Workspace/Users/30002818@lot.pl/.bundle/${bundle.name}/${bundle.target}
+    permissions:
+      - group_name: databricks-panda-data-engineers
+        level: CAN_VIEW
+      - group_name: dbr-we-prod-panda-premium-vnet-workspace-admins
+        level: CAN_MANAGE
+      - user_name: 30002818@lot.pl
+        level: CAN_MANAGE

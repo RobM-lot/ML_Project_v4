@@ -1,0 +1,253 @@
+resources:
+  jobs:
+    daily_scoring_manual:
+      name: "[${bundle.target}] daily_scoring_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../notebooks/04_environment_check.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+        - task_key: cdf_scoring
+          depends_on:
+            - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 600000
+          retry_on_timeout: false
+          timeout_seconds: 14400
+          notebook_task:
+            notebook_path: ../notebooks/01_cdf_stream.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+              RUN_BOOTSTRAP: "True"
+              RESET_CHECKPOINT: "False"
+              STARTING_VERSION: ""
+
+        - task_key: prediction_audit_monitoring
+          depends_on:
+            - task_key: cdf_scoring
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../notebooks/06_prediction_audit_monitoring.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+    weekly_training_manual:
+      name: "[${bundle.target}] weekly_training_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../notebooks/04_environment_check.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+        - task_key: build_training_set
+          depends_on:
+            - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 600000
+          retry_on_timeout: false
+          timeout_seconds: 10800
+          notebook_task:
+            notebook_path: ../notebooks/01_build_training_set.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+        - task_key: train_compare_models
+          depends_on:
+            - task_key: build_training_set
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 600000
+          retry_on_timeout: false
+          timeout_seconds: 21600
+          notebook_task:
+            notebook_path: ../notebooks/01_train_compare_models.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+        - task_key: quality_gate_check
+          depends_on:
+            - task_key: train_compare_models
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../notebooks/05_quality_gate_check.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+              RUN_ID: ""
+              PROMOTE_IF_PASS: "False"
+
+    register_manual:
+      name: "[${bundle.target}] register_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: register_best
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../notebooks/02_register_best.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+              RUN_ID: ""
+              PROMOTE_IF_PASS: "True"
+
+    evaluate_manual:
+      name: "[${bundle.target}] evaluate_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: evaluate_model
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 5400
+          notebook_task:
+            notebook_path: ../notebooks/03_evaluate_model.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+              EVAL_MODEL_SOURCE: "champion"
+              EVAL_RUN_ID: ""
+
+    feature_coverage_diagnostics_manual:
+      name: "[${bundle.target}] feature_coverage_diagnostics_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: feature_coverage_diagnostics
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../notebooks/07_route_fs_coverage_diagnostics.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+    daily_scoring_reset_manual:
+      name: "[${bundle.target}] daily_scoring_reset_manual"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../notebooks/04_environment_check.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+
+        - task_key: cdf_scoring_reset
+          depends_on:
+            - task_key: environment_contract_check
+          existing_cluster_id: ${var.existing_cluster_id}
+          max_retries: 1
+          min_retry_interval_millis: 600000
+          retry_on_timeout: false
+          timeout_seconds: 14400
+          notebook_task:
+            notebook_path: ../notebooks/01_cdf_stream.ipynb
+            base_parameters:
+              ENV: ${var.runtime_env}
+              SOURCE_CATALOG: ${var.source_catalog}
+              SOURCE_SCHEMA: ${var.source_schema}
+              SILVER_CATALOG: ${var.silver_catalog}
+              SILVER_SCHEMA: ${var.silver_schema}
+              GOLD_CATALOG: ${var.gold_catalog}
+              GOLD_SCHEMA: ${var.gold_schema}
+              RUN_BOOTSTRAP: "True"
+              RESET_CHECKPOINT: "True"
+              STARTING_VERSION: ""

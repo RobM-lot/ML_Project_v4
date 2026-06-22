@@ -326,16 +326,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
             .withColumn("isLO", F.when(F.col("ac_owner") == "LO", 1).otherwise(0))
         )
 
-        for i in range(1, settings.MAX_MARKER_LENGTH + 1):
-            df_derived = df_derived.withColumn(
-                f"marker_{i}",
-                F.when(
-                    F.length(F.col("marker")) >= i,
-                    F.when(F.substring(F.col("marker"), i, 1) == "Y", 0)
-                    .when(F.substring(F.col("marker"), i, 1) == "N", 1)
-                    .otherwise(F.lit(None).cast("double")),
-                ).otherwise(F.lit(None).cast("double")),
-            )
+        df_derived = add_marker_columns(df_derived, max_marker_length=settings.MAX_MARKER_LENGTH)
 
         return df_derived
 

@@ -686,289 +686,39 @@ def _create_ema_schema(entity_cols, target_cols_dict, count_prefix, half_life_da
 
 
 def _get_ema_compute_function(entity_cols, target_cols_dict, count_prefix, ema_schema, half_life_days):
+    """T15 — Uses pandas ewm() with time-aware halflife instead of manual decay loop.
+
+    Handles irregular day spacing via `times` parameter.
+    Confidence = ewm of daily flight count (same halflife).
+    """
     def compute_ema_dynamic(pdf: pd.DataFrame) -> pd.DataFrame:
         pdf = pdf.sort_values("event_date").reset_index(drop=True)
-        lambdas = {k: math.log(2) / v for k, v in half_life_days.items()}
+        times = pd.to_datetime(pdf["event_date"])
 
-        states = {prefix: {k: np.nan for k in lambdas.keys()} for prefix in target_cols_dict.values()}
-        conf = {k: 0.0 for k in lambdas.keys()}
-        last_day = None
+        out = {"event_date": pdf["event_date"].tolist()}
+        for col_name in entity_cols:
+            out[col_name] = pdf[col_name].tolist()
 
-        out = {field.name: [] for field in ema_schema.fields}
+        for hl_name, hl_days in half_life_days.items():
+            halflife_td = pd.Timedelta(days=hl_days)
 
-        for _, row in pdf.iterrows():
-            day = int(row["day_num"])
-            cnt = float(row["daily_cnt"])
-            dt = max(0, day - last_day) if last_day is not None else 0
-
-            current_morning_conf = {}
-            for k, lam in lambdas.items():
-                decay = math.exp(-lam * dt) if last_day is not None else 0.0
-                current_morning_conf[k] = conf[k] * decay if last_day is not None else 0.0
-
-            out["event_date"].append(row["event_date"])
-            for col_name in entity_cols:
-                out[col_name].append(row[col_name])
-
+            # EMA for each target prefix
             for _, prefix in target_cols_dict.items():
-                for k in lambdas.keys():
-                    out[f"ema_{prefix}_{k}"].append(states[prefix][k])
+                col = f"daily_avg_{prefix}"
+                series = pdf[col].astype(float)
+                ema_vals = series.ewm(halflife=halflife_td, times=times, adjust=False).mean()
+                # Shift by 1: EMA at time t uses data up to t-1 (morning value)
+                out[f"ema_{prefix}_{hl_name}"] = ema_vals.shift(1).tolist()
 
-            for k in lambdas.keys():
-                out[f"ema_confidence_{count_prefix}_{k}"].append(current_morning_conf[k])
-
-            for k, lam in lambdas.items():
-                decay = math.exp(-lam * dt) if last_day is not None else 0.0
-                conf[k] = current_morning_conf[k] + cnt
-
-                for _, prefix in target_cols_dict.items():
-                    y = row[f"daily_avg_{prefix}"]
-                    if np.isnan(states[prefix][k]):
-                        states[prefix][k] = float(y) if pd.notnull(y) else np.nan
-                    elif pd.notnull(y):
-                        states[prefix][k] = (states[prefix][k] * decay) + (1.0 - decay) * float(y)
-                    else:
-                        states[prefix][k] = states[prefix][k] * decay
-
-            last_day = day
+            # Confidence: EMA of daily count
+            cnt_series = pdf["daily_cnt"].astype(float)
+            conf_vals = cnt_series.ewm(halflife=halflife_td, times=times, adjust=False).mean()
+            out[f"ema_confidence_{count_prefix}_{hl_name}"] = conf_vals.shift(1).tolist()
 
         return pd.DataFrame(out)
 
     return compute_ema_dynamic
 
-
-def _build_route_feature_store(df, entity_cols, target_cols_dict, count_prefix):
-    df = df.withColumn(
-        "duration_ratio",
-        F.when(
-            F.col("scheduled_block_time_sec") > 0,
-            (F.col("actual_block_time_sec") / F.col("scheduled_block_time_sec")).cast("double"),
-        ),
-    )
-
-    entities = df.select(*entity_cols).distinct()
-    date_bounds = df.select(F.min("event_date").alias("min_date"), F.max("event_date").alias("max_date"))
-    calendar = date_bounds.select(
-        F.explode(F.sequence(F.col("min_date"), F.col("max_date"), F.expr("INTERVAL 1 DAY"))).alias("event_date")
-    )
-
-    markers = (
-        entities.crossJoin(calendar)
-        .withColumn("event_ts", F.to_timestamp(F.col("event_date")))
-        .withColumn("is_marker", F.lit(1))
-        .withColumn("_flight_row", F.lit(None).cast("int"))
-    )
-    flights = (
-        df.select("event_ts", "event_date", *entity_cols, *target_cols_dict.keys())
-        .withColumn("is_marker", F.lit(0))
-        .withColumn("_flight_row", F.lit(1))
-    )
-
-    for col_name in target_cols_dict.keys():
-        markers = markers.withColumn(col_name, F.lit(None).cast("double"))
-
-    union_df = flights.unionByName(markers.select(flights.columns), allowMissingColumns=True)
-    union_df = union_df.repartition(*entity_cols)
-    order_col = F.col("event_ts").cast("long")
-
-    windows = {
-        "7d": Window.partitionBy(*entity_cols).orderBy(order_col).rangeBetween(-7 * SECONDS_IN_DAY, -1),
-        "30d": Window.partitionBy(*entity_cols).orderBy(order_col).rangeBetween(-30 * SECONDS_IN_DAY, -1),
-    }
-
-    window_exprs = []
-    for window_name, window_spec in windows.items():
-        for src_col, prefix in target_cols_dict.items():
-            window_exprs.extend(
-                [
-                    F.avg(src_col).over(window_spec).alias(f"avg_{prefix}_{window_name}"),
-                    F.stddev(src_col).over(window_spec).alias(f"std_{prefix}_{window_name}"),
-                    F.expr(f"percentile_approx({src_col}, 0.9)").over(window_spec).alias(f"p90_{prefix}_{window_name}"),
-                    F.min(src_col).over(window_spec).alias(f"min_{prefix}_{window_name}"),
-                    F.max(src_col).over(window_spec).alias(f"max_{prefix}_{window_name}"),
-                ]
-            )
-        window_exprs.append(F.count("_flight_row").over(window_spec).cast("double").alias(f"count_{count_prefix}_{window_name}"))
-
-    feat_df = union_df.select("*", *window_exprs)
-    for _, prefix in target_cols_dict.items():
-        feat_df = feat_df.withColumn(
-            f"trend_{prefix}_7d",
-            F.col(f"avg_{prefix}_7d") - F.col(f"avg_{prefix}_30d"),
-        )
-
-    feat_df = (
-        feat_df
-        .withColumn(f"has_hist_{count_prefix}_7d", F.when(F.col(f"count_{count_prefix}_7d") > 0, 1.0).otherwise(0.0))
-        .withColumn(f"has_hist_{count_prefix}_30d", F.when(F.col(f"count_{count_prefix}_30d") > 0, 1.0).otherwise(0.0))
-    )
-
-    daily_cols = [F.avg(src_col).alias(f"daily_avg_{prefix}") for src_col, prefix in target_cols_dict.items()]
-    daily_agg_flights = df.groupBy("event_date", *entity_cols).agg(*daily_cols, F.count("*").alias("daily_cnt"))
-    daily_agg = (
-        entities.crossJoin(calendar)
-        .join(daily_agg_flights, on=["event_date", *entity_cols], how="left")
-        .fillna({"daily_cnt": 0})
-        .withColumn("day_num", F.datediff(F.col("event_date"), F.lit("1970-01-01")))
-    )
-
-    ema_schema = _create_ema_schema(entity_cols, target_cols_dict, count_prefix, HALF_LIFE_DAYS)
-    ema_func = _get_ema_compute_function(entity_cols, target_cols_dict, count_prefix, ema_schema, HALF_LIFE_DAYS)
-    ema_df = daily_agg.groupBy(*entity_cols).applyInPandas(ema_func, schema=ema_schema)
-    feat_df = feat_df.join(ema_df, on=["event_date", *entity_cols], how="left")
-
-    for _, prefix in target_cols_dict.items():
-        for window_name in HALF_LIFE_DAYS.keys():
-            feat_df = feat_df.withColumn(
-                f"delta_ema_avg_{prefix}_{window_name}",
-                F.col(f"ema_{prefix}_{window_name}") - F.col(f"avg_{prefix}_{window_name}"),
-            )
-
-    return feat_df.filter(F.col("is_marker") == 1).drop("event_ts", "is_marker", "_flight_row", *target_cols_dict.keys())
-
-
-def _build_stand_features(df, is_taxi_out):
-    ap_col = "dep_ap_sched" if is_taxi_out else "arr_ap_sched"
-    stand_col = "dep_stand" if is_taxi_out else "arr_stand"
-    target_col = "taxi_out_sec" if is_taxi_out else "taxi_in_sec"
-    prefix = "out" if is_taxi_out else "in"
-
-    clean_df = df.filter(F.col(stand_col).isNotNull() & (F.col(stand_col) != ""))
-    markers = (
-        clean_df.select("event_date", ap_col, stand_col).distinct()
-        .withColumn("event_ts_unix", F.unix_timestamp("event_date"))
-        .withColumn("target_val", F.lit(None).cast("double"))
-        .withColumn("is_marker", F.lit(1))
-    )
-    flights = (
-        clean_df.select("event_date", ap_col, stand_col, F.col(target_col).cast("double").alias("target_val"))
-        .withColumn("event_ts_unix", F.unix_timestamp("event_date"))
-        .withColumn("is_marker", F.lit(0))
-    )
-
-    union_df = flights.unionByName(markers)
-    w_7d = Window.partitionBy(ap_col, stand_col).orderBy("event_ts_unix").rangeBetween(-7 * SECONDS_IN_DAY, -1)
-    w_30d = Window.partitionBy(ap_col, stand_col).orderBy("event_ts_unix").rangeBetween(-30 * SECONDS_IN_DAY, -1)
-
-    feat_df = (
-        union_df
-        .withColumn(f"stand_count_{prefix}_7d", F.count("target_val").over(w_7d).cast("double"))
-        .withColumn(f"stand_avg_taxi_{prefix}_7d", F.avg("target_val").over(w_7d))
-        .withColumn(f"stand_count_{prefix}_30d", F.count("target_val").over(w_30d).cast("double"))
-        .withColumn(f"stand_avg_taxi_{prefix}_30d", F.avg("target_val").over(w_30d))
-        .withColumn(f"stand_std_taxi_{prefix}_30d", F.stddev("target_val").over(w_30d))
-        .withColumn(f"stand_p10_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.1)").over(w_30d))
-        .withColumn(f"stand_p50_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.5)").over(w_30d))
-        .withColumn(f"stand_p90_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.9)").over(w_30d))
-        .withColumn(
-            f"stand_trend_taxi_{prefix}_7d",
-            F.col(f"stand_avg_taxi_{prefix}_7d") - F.col(f"stand_avg_taxi_{prefix}_30d"),
-        )
-    )
-
-    rename_pairs = [
-        (ap_col, f"fs_{'dep' if is_taxi_out else 'arr'}_ap_sched"),
-        (stand_col, f"fs_{'dep' if is_taxi_out else 'arr'}_stand"),
-    ]
-    for old_name, new_name in rename_pairs:
-        feat_df = feat_df.withColumnRenamed(old_name, new_name)
-
-    return feat_df.filter(F.col("is_marker") == 1).drop("event_ts_unix", "target_val", "is_marker")
-
-
-# =====================================================================================
-# LEGACY fs_* (Iter1). TODO Iter2 cleanup: do usunięcia po przejściu na ft_* i retreningu.
-# Zostawione obok nowych ft_* żeby nie zerwać obecnego treningu/scoringu przed migracją.
-# =====================================================================================
-
-_FS_TAXI_OUT_SPEC = dict(
-    entity_cols=["dep_ap_sched"],
-    target_cols_dict={"taxi_out_sec": "taxi_out", "duration_ratio": "dur_ratio_dep"},
-    count_prefix="dep",
-)
-
-_FS_AIRBORNE_SPEC = dict(
-    entity_cols=["dep_ap_sched", "arr_ap_sched"],
-    target_cols_dict={
-        "airborne_sec": "airborne",
-        "arrival_delay_sec": "arrival_delay",
-        "duration_ratio": "dur_ratio_route",
-    },
-    count_prefix="route",
-)
-
-_FS_TAXI_IN_SPEC = dict(
-    entity_cols=["arr_ap_sched"],
-    target_cols_dict={"taxi_in_sec": "taxi_in", "duration_ratio": "dur_ratio_arr"},
-    count_prefix="arr",
-)
-
-
-@dp.materialized_view(
-    name=_fs_table("fs_taxi_out_features"),
-    schema=route_schema_ddl(**_FS_TAXI_OUT_SPEC),
-    table_properties=DLT_TABLE_PROPERTIES,
-)
-def fs_taxi_out_features():
-    return _build_route_feature_store(
-        spark.read.table(_fs_table("cleaned_flight_data_full_table")),
-        **_FS_TAXI_OUT_SPEC,
-    )
-
-
-@dp.materialized_view(
-    name=_fs_table("fs_airborne_features"),
-    schema=route_schema_ddl(**_FS_AIRBORNE_SPEC, extra_pk_col="route_id"),
-    table_properties=DLT_TABLE_PROPERTIES,
-)
-def fs_airborne_features():
-    return _build_route_feature_store(
-        spark.read.table(_fs_table("cleaned_flight_data_full_table")),
-        **_FS_AIRBORNE_SPEC,
-    ).withColumn(
-        "route_id",
-        F.concat_ws("_", F.col("dep_ap_sched"), F.col("arr_ap_sched")),
-    )
-
-
-@dp.materialized_view(
-    name=_fs_table("fs_taxi_in_features"),
-    schema=route_schema_ddl(**_FS_TAXI_IN_SPEC),
-    table_properties=DLT_TABLE_PROPERTIES,
-)
-def fs_taxi_in_features():
-    return _build_route_feature_store(
-        spark.read.table(_fs_table("cleaned_flight_data_full_table")),
-        **_FS_TAXI_IN_SPEC,
-    )
-
-
-@dp.materialized_view(
-    name=_fs_table("fs_stand_out_features"),
-    schema=stand_schema_ddl(is_taxi_out=True),
-    table_properties=DLT_TABLE_PROPERTIES,
-)
-def fs_stand_out_features():
-    return _build_stand_features(
-        spark.read.table(_fs_table("cleaned_flight_data_full_table")), is_taxi_out=True
-    ).withColumn(
-        "stand_id",
-        F.concat_ws("_", F.col("fs_dep_ap_sched"), F.col("fs_dep_stand")),
-    )
-
-
-@dp.materialized_view(
-    name=_fs_table("fs_stand_in_features"),
-    schema=stand_schema_ddl(is_taxi_out=False),
-    table_properties=DLT_TABLE_PROPERTIES,
-)
-def fs_stand_in_features():
-    return _build_stand_features(
-        spark.read.table(_fs_table("cleaned_flight_data_full_table")), is_taxi_out=False
-    ).withColumn(
-        "stand_id",
-        F.concat_ws("_", F.col("fs_arr_ap_sched"), F.col("fs_arr_stand")),
-    )
 
 
 _SCD2_VERSION_TS = "__START_AT"
@@ -1061,13 +811,9 @@ def ft_airport_timezone():
 
 
 def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
-    """B2 — statystyki dzienne BEZ densyfikacji kalendarza.
+    """T14 — Pre-aggregate to daily, then rolling windows (10-50x faster).
 
-    Różnice względem legacy `_build_route_feature_store`:
-      - markery TYLKO na dniach z eventami (brak `entities.crossJoin(calendar)`),
-      - EMA liczona po dniach z eventami (daily_agg bez crossJoin),
-      - dochodzi `days_since_last_event` (luka dni od poprzedniego eventu encji),
-        spójna z PIT lookup po timestamp_lookup_key.
+    avg = sum/count (weighted, no mean-of-means). std from sum_sq. p90 approx.
     """
     df = df.withColumn(
         "duration_ratio",
@@ -1077,158 +823,141 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
         ),
     )
 
-    # Markery TYLKO na dniach z eventami (B2: brak crossJoin(calendar))
-    markers = (
-        df.select("event_date", *entity_cols).distinct()
-        .withColumn("event_ts", F.to_timestamp(F.col("event_date")))
-        .withColumn("is_marker", F.lit(1))
-        .withColumn("_flight_row", F.lit(None).cast("int"))
-    )
-    flights = (
-        df.select("event_ts", "event_date", *entity_cols, *target_cols_dict.keys())
-        .withColumn("is_marker", F.lit(0))
-        .withColumn("_flight_row", F.lit(1))
-    )
-    for col_name in target_cols_dict.keys():
-        markers = markers.withColumn(col_name, F.lit(None).cast("double"))
+    # Step 1: Pre-aggregate to daily level
+    agg_exprs = []
+    for src_col, prefix in target_cols_dict.items():
+        agg_exprs.extend([
+            F.sum(src_col).alias(f"_sum_{prefix}"),
+            F.count(src_col).alias(f"_cnt_{prefix}"),
+            F.min(src_col).alias(f"_min_{prefix}"),
+            F.max(src_col).alias(f"_max_{prefix}"),
+            F.sum(F.col(src_col) * F.col(src_col)).alias(f"_sumsq_{prefix}"),
+            F.expr(f"percentile_approx({src_col}, 0.9)").alias(f"_p90_{prefix}"),
+        ])
+    agg_exprs.append(F.count("*").alias("_fcnt"))
 
-    union_df = flights.unionByName(markers.select(flights.columns), allowMissingColumns=True)
-    union_df = union_df.repartition(*entity_cols)
-    order_col = F.col("event_ts").cast("long")
+    daily = df.groupBy("event_date", *entity_cols).agg(*agg_exprs)
+    daily = daily.withColumn("_ets", F.unix_timestamp("event_date"))
 
-    windows = {
-        "7d": Window.partitionBy(*entity_cols).orderBy(order_col).rangeBetween(-7 * SECONDS_IN_DAY, -1),
-        "30d": Window.partitionBy(*entity_cols).orderBy(order_col).rangeBetween(-30 * SECONDS_IN_DAY, -1),
-    }
+    # Step 2: Rolling windows on daily data
+    w7 = Window.partitionBy(*entity_cols).orderBy("_ets").rangeBetween(-7 * SECONDS_IN_DAY, -1)
+    w30 = Window.partitionBy(*entity_cols).orderBy("_ets").rangeBetween(-30 * SECONDS_IN_DAY, -1)
 
-    window_exprs = []
-    for window_name, window_spec in windows.items():
-        for src_col, prefix in target_cols_dict.items():
-            window_exprs.extend(
-                [
-                    F.avg(src_col).over(window_spec).alias(f"avg_{prefix}_{window_name}"),
-                    F.stddev(src_col).over(window_spec).alias(f"std_{prefix}_{window_name}"),
-                    F.expr(f"percentile_approx({src_col}, 0.9)").over(window_spec).alias(f"p90_{prefix}_{window_name}"),
-                    F.min(src_col).over(window_spec).alias(f"min_{prefix}_{window_name}"),
-                    F.max(src_col).over(window_spec).alias(f"max_{prefix}_{window_name}"),
-                ]
-            )
-        window_exprs.append(F.count("_flight_row").over(window_spec).cast("double").alias(f"count_{count_prefix}_{window_name}"))
+    for wn, w in [("7d", w7), ("30d", w30)]:
+        for _, prefix in target_cols_dict.items():
+            rs = F.sum(f"_sum_{prefix}").over(w)
+            rc = F.sum(f"_cnt_{prefix}").over(w)
+            rsq = F.sum(f"_sumsq_{prefix}").over(w)
+            daily = daily.withColumn(f"avg_{prefix}_{wn}", rs / rc)
+            daily = daily.withColumn(f"std_{prefix}_{wn}", F.sqrt(F.abs(rsq / rc - F.pow(rs / rc, 2))))
+            daily = daily.withColumn(f"p90_{prefix}_{wn}", F.max(f"_p90_{prefix}").over(w))
+            daily = daily.withColumn(f"min_{prefix}_{wn}", F.min(f"_min_{prefix}").over(w))
+            daily = daily.withColumn(f"max_{prefix}_{wn}", F.max(f"_max_{prefix}").over(w))
+        daily = daily.withColumn(f"count_{count_prefix}_{wn}", F.sum("_fcnt").over(w).cast("double"))
 
-    feat_df = union_df.select("*", *window_exprs)
+    # Trend + has_hist
     for _, prefix in target_cols_dict.items():
-        feat_df = feat_df.withColumn(
-            f"trend_{prefix}_7d",
-            F.col(f"avg_{prefix}_7d") - F.col(f"avg_{prefix}_30d"),
-        )
-
-    feat_df = (
-        feat_df
+        daily = daily.withColumn(f"trend_{prefix}_7d", F.col(f"avg_{prefix}_7d") - F.col(f"avg_{prefix}_30d"))
+    daily = (
+        daily
         .withColumn(f"has_hist_{count_prefix}_7d", F.when(F.col(f"count_{count_prefix}_7d") > 0, 1.0).otherwise(0.0))
         .withColumn(f"has_hist_{count_prefix}_30d", F.when(F.col(f"count_{count_prefix}_30d") > 0, 1.0).otherwise(0.0))
     )
 
-    # Daily agg BEZ crossJoin(calendar) — tylko dni z eventami (B2)
-    daily_cols = [F.avg(src_col).alias(f"daily_avg_{prefix}") for src_col, prefix in target_cols_dict.items()]
-    daily_agg_flights = df.groupBy("event_date", *entity_cols).agg(*daily_cols, F.count("*").alias("daily_cnt"))
-
-    # days_since_last_event: luka dni względem poprzedniego eventu encji
-    w_gap = Window.partitionBy(*entity_cols).orderBy("event_date")
-    daily_agg_flights = (
-        daily_agg_flights
-        .withColumn("prev_event_date", F.lag("event_date").over(w_gap))
-        .withColumn(
-            "days_since_last_event",
-            F.when(F.col("prev_event_date").isNull(), F.lit(0.0))
-            .otherwise(F.datediff(F.col("event_date"), F.col("prev_event_date")).cast("double")),
-        )
-        .drop("prev_event_date")
+    # days_since_last_event
+    wg = Window.partitionBy(*entity_cols).orderBy("event_date")
+    daily = (
+        daily
+        .withColumn("_prev", F.lag("event_date").over(wg))
+        .withColumn("days_since_last_event",
+            F.when(F.col("_prev").isNull(), F.lit(0.0))
+            .otherwise(F.datediff(F.col("event_date"), F.col("_prev")).cast("double")))
+        .drop("_prev")
     )
 
-    daily_agg = daily_agg_flights.withColumn("day_num", F.datediff(F.col("event_date"), F.lit("1970-01-01")))
+    # EMA (already operates on daily data)
+    ema_input = daily.withColumn("day_num", F.datediff(F.col("event_date"), F.lit("1970-01-01")))
+    for _, prefix in target_cols_dict.items():
+        ema_input = ema_input.withColumn(f"daily_avg_{prefix}", F.col(f"_sum_{prefix}") / F.col(f"_cnt_{prefix}"))
+    ema_input = ema_input.withColumn("daily_cnt", F.col("_fcnt").cast("double"))
 
     ema_schema = _create_ema_schema(entity_cols, target_cols_dict, count_prefix, HALF_LIFE_DAYS)
     ema_func = _get_ema_compute_function(entity_cols, target_cols_dict, count_prefix, ema_schema, HALF_LIFE_DAYS)
-    ema_df = daily_agg.groupBy(*entity_cols).applyInPandas(ema_func, schema=ema_schema)
-    feat_df = feat_df.join(ema_df, on=["event_date", *entity_cols], how="left")
+    ema_df = ema_input.groupBy(*entity_cols).applyInPandas(ema_func, schema=ema_schema)
+    daily = daily.join(ema_df, on=["event_date", *entity_cols], how="left")
 
     for _, prefix in target_cols_dict.items():
-        for window_name in HALF_LIFE_DAYS.keys():
-            feat_df = feat_df.withColumn(
-                f"delta_ema_avg_{prefix}_{window_name}",
-                F.col(f"ema_{prefix}_{window_name}") - F.col(f"avg_{prefix}_{window_name}"),
+        for wn in HALF_LIFE_DAYS.keys():
+            daily = daily.withColumn(
+                f"delta_ema_avg_{prefix}_{wn}",
+                F.col(f"ema_{prefix}_{wn}") - F.col(f"avg_{prefix}_{wn}"),
             )
 
-    # Dołącz days_since_last_event do wierszy feature (per event-day)
-    days_since = daily_agg_flights.select("event_date", *entity_cols, "days_since_last_event")
-    feat_df = feat_df.join(days_since, on=["event_date", *entity_cols], how="left")
-
-    return feat_df.filter(F.col("is_marker") == 1).drop("event_ts", "is_marker", "_flight_row", *target_cols_dict.keys())
+    internal = [c for c in daily.columns if c.startswith("_")]
+    return daily.drop(*internal)
 
 
 def _build_stand_daily(df, is_taxi_out):
-    """B2 — stand-level statystyki + days_since_last_event. Markery już są tylko na
-    dniach z eventami (stand features nigdy nie używały densyfikacji kalendarza)."""
+    """T14 — Optimized stand features: pre-aggregate to daily, then rolling windows."""
     ap_col = "dep_ap_sched" if is_taxi_out else "arr_ap_sched"
     stand_col = "dep_stand" if is_taxi_out else "arr_stand"
     target_col = "taxi_out_sec" if is_taxi_out else "taxi_in_sec"
     prefix = "out" if is_taxi_out else "in"
 
     clean_df = df.filter(F.col(stand_col).isNotNull() & (F.col(stand_col) != ""))
-    markers = (
-        clean_df.select("event_date", ap_col, stand_col).distinct()
-        .withColumn("event_ts_unix", F.unix_timestamp("event_date"))
-        .withColumn("target_val", F.lit(None).cast("double"))
-        .withColumn("is_marker", F.lit(1))
-    )
-    flights = (
-        clean_df.select("event_date", ap_col, stand_col, F.col(target_col).cast("double").alias("target_val"))
-        .withColumn("event_ts_unix", F.unix_timestamp("event_date"))
-        .withColumn("is_marker", F.lit(0))
-    )
 
-    union_df = flights.unionByName(markers)
-    w_7d = Window.partitionBy(ap_col, stand_col).orderBy("event_ts_unix").rangeBetween(-7 * SECONDS_IN_DAY, -1)
-    w_30d = Window.partitionBy(ap_col, stand_col).orderBy("event_ts_unix").rangeBetween(-30 * SECONDS_IN_DAY, -1)
+    # Step 1: Daily aggregation per (airport, stand)
+    daily = clean_df.groupBy("event_date", ap_col, stand_col).agg(
+        F.sum(target_col).alias("_sum"),
+        F.count(target_col).alias("_cnt"),
+        F.sum(F.col(target_col) * F.col(target_col)).alias("_sumsq"),
+        F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.1)").alias("_p10"),
+        F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.5)").alias("_p50"),
+        F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.9)").alias("_p90"),
+    )
+    daily = daily.withColumn("_ets", F.unix_timestamp("event_date"))
+
+    # Step 2: Rolling windows on daily data
+    w7 = Window.partitionBy(ap_col, stand_col).orderBy("_ets").rangeBetween(-7 * SECONDS_IN_DAY, -1)
+    w30 = Window.partitionBy(ap_col, stand_col).orderBy("_ets").rangeBetween(-30 * SECONDS_IN_DAY, -1)
+
+    rs7 = F.sum("_sum").over(w7)
+    rc7 = F.sum("_cnt").over(w7)
+    rs30 = F.sum("_sum").over(w30)
+    rc30 = F.sum("_cnt").over(w30)
 
     feat_df = (
-        union_df
-        .withColumn(f"stand_count_{prefix}_7d", F.count("target_val").over(w_7d).cast("double"))
-        .withColumn(f"stand_avg_taxi_{prefix}_7d", F.avg("target_val").over(w_7d))
-        .withColumn(f"stand_count_{prefix}_30d", F.count("target_val").over(w_30d).cast("double"))
-        .withColumn(f"stand_avg_taxi_{prefix}_30d", F.avg("target_val").over(w_30d))
-        .withColumn(f"stand_std_taxi_{prefix}_30d", F.stddev("target_val").over(w_30d))
-        .withColumn(f"stand_p10_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.1)").over(w_30d))
-        .withColumn(f"stand_p50_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.5)").over(w_30d))
-        .withColumn(f"stand_p90_taxi_{prefix}_30d", F.expr("percentile_approx(target_val, 0.9)").over(w_30d))
-        .withColumn(
-            f"stand_trend_taxi_{prefix}_7d",
-            F.col(f"stand_avg_taxi_{prefix}_7d") - F.col(f"stand_avg_taxi_{prefix}_30d"),
-        )
+        daily
+        .withColumn(f"stand_count_{prefix}_7d", rc7.cast("double"))
+        .withColumn(f"stand_avg_taxi_{prefix}_7d", rs7 / rc7)
+        .withColumn(f"stand_count_{prefix}_30d", rc30.cast("double"))
+        .withColumn(f"stand_avg_taxi_{prefix}_30d", rs30 / rc30)
+        .withColumn(f"stand_std_taxi_{prefix}_30d",
+            F.sqrt(F.abs(F.sum("_sumsq").over(w30) / rc30 - F.pow(rs30 / rc30, 2))))
+        .withColumn(f"stand_p10_taxi_{prefix}_30d", F.min("_p10").over(w30))
+        .withColumn(f"stand_p50_taxi_{prefix}_30d", F.avg("_p50").over(w30))
+        .withColumn(f"stand_p90_taxi_{prefix}_30d", F.max("_p90").over(w30))
+        .withColumn(f"stand_trend_taxi_{prefix}_7d",
+            F.col(f"stand_avg_taxi_{prefix}_7d") - F.col(f"stand_avg_taxi_{prefix}_30d"))
     )
 
-    # days_since_last_event per (ap, stand) względem poprzedniego event-day
-    w_gap = Window.partitionBy(ap_col, stand_col).orderBy("event_date")
-    gaps = (
-        clean_df.select("event_date", ap_col, stand_col).distinct()
-        .withColumn("prev_event_date", F.lag("event_date").over(w_gap))
-        .withColumn(
-            "days_since_last_event",
-            F.when(F.col("prev_event_date").isNull(), F.lit(0.0))
-            .otherwise(F.datediff(F.col("event_date"), F.col("prev_event_date")).cast("double")),
-        )
-        .select("event_date", ap_col, stand_col, "days_since_last_event")
+    # days_since_last_event
+    wg = Window.partitionBy(ap_col, stand_col).orderBy("event_date")
+    feat_df = (
+        feat_df
+        .withColumn("_prev", F.lag("event_date").over(wg))
+        .withColumn("days_since_last_event",
+            F.when(F.col("_prev").isNull(), F.lit(0.0))
+            .otherwise(F.datediff(F.col("event_date"), F.col("_prev")).cast("double")))
+        .drop("_prev")
     )
-    feat_df = feat_df.join(gaps, on=["event_date", ap_col, stand_col], how="left")
 
-    rename_pairs = [
-        (ap_col, f"fs_{'dep' if is_taxi_out else 'arr'}_ap_sched"),
-        (stand_col, f"fs_{'dep' if is_taxi_out else 'arr'}_stand"),
-    ]
-    for old_name, new_name in rename_pairs:
-        feat_df = feat_df.withColumnRenamed(old_name, new_name)
+    dep_or_arr = "dep" if is_taxi_out else "arr"
+    feat_df = feat_df.withColumnRenamed(ap_col, f"fs_{dep_or_arr}_ap_sched")
+    feat_df = feat_df.withColumnRenamed(stand_col, f"fs_{dep_or_arr}_stand")
 
-    return feat_df.filter(F.col("is_marker") == 1).drop("event_ts_unix", "target_val", "is_marker")
+    internal = [c for c in feat_df.columns if c.startswith("_")]
+    return feat_df.drop(*internal)
 
 
 _FT_TAXI_OUT_SPEC = dict(

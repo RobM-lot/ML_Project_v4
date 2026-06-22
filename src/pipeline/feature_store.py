@@ -1272,7 +1272,7 @@ def ft_airport_daily_taxi_out():
     table_properties=DLT_TABLE_PROPERTIES,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
-@dp.expect("non_negative_avg", "avg_taxi_out_7d IS NULL OR avg_taxi_out_7d >= 0")
+@dp.expect("non_negative_avg", "avg_airborne_7d IS NULL OR avg_airborne_7d >= 0")
 def ft_route_daily_stats():
     return _build_daily_stats(
         spark.read.table(_fs_table("cleaned_flight_data_full_table")),
@@ -1288,7 +1288,7 @@ def ft_route_daily_stats():
     table_properties=DLT_TABLE_PROPERTIES,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
-@dp.expect("non_negative_avg", "avg_taxi_out_7d IS NULL OR avg_taxi_out_7d >= 0")
+@dp.expect("non_negative_avg", "avg_taxi_in_7d IS NULL OR avg_taxi_in_7d >= 0")
 def ft_airport_daily_taxi_in():
     return _build_daily_stats(
         spark.read.table(_fs_table("cleaned_flight_data_full_table")),
@@ -1301,7 +1301,7 @@ def ft_airport_daily_taxi_in():
     table_properties=DLT_TABLE_PROPERTIES,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
-@dp.expect("non_negative_avg", "avg_taxi_out_7d IS NULL OR avg_taxi_out_7d >= 0")
+@dp.expect("non_negative_avg", "stand_avg_taxi_out_7d IS NULL OR stand_avg_taxi_out_7d >= 0")
 def ft_stand_daily_out():
     return _build_stand_daily(
         spark.read.table(_fs_table("cleaned_flight_data_full_table")), is_taxi_out=True
@@ -1316,7 +1316,7 @@ def ft_stand_daily_out():
     table_properties=DLT_TABLE_PROPERTIES,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
-@dp.expect("non_negative_avg", "avg_taxi_out_7d IS NULL OR avg_taxi_out_7d >= 0")
+@dp.expect("non_negative_avg", "stand_avg_taxi_in_7d IS NULL OR stand_avg_taxi_in_7d >= 0")
 def ft_stand_daily_in():
     return _build_stand_daily(
         spark.read.table(_fs_table("cleaned_flight_data_full_table")), is_taxi_out=False

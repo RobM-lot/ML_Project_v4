@@ -706,13 +706,13 @@ def _get_ema_compute_function(entity_cols, target_cols_dict, count_prefix, ema_s
             for _, prefix in target_cols_dict.items():
                 col = f"daily_avg_{prefix}"
                 series = pdf[col].astype(float)
-                ema_vals = series.ewm(halflife=halflife_td, times=times, adjust=False).mean()
+                ema_vals = series.ewm(halflife=halflife_td, times=times).mean()
                 # Shift by 1: EMA at time t uses data up to t-1 (morning value)
                 out[f"ema_{prefix}_{hl_name}"] = ema_vals.shift(1).tolist()
 
             # Confidence: EMA of daily count
             cnt_series = pdf["daily_cnt"].astype(float)
-            conf_vals = cnt_series.ewm(halflife=halflife_td, times=times, adjust=False).mean()
+            conf_vals = cnt_series.ewm(halflife=halflife_td, times=times).mean()
             out[f"ema_confidence_{count_prefix}_{hl_name}"] = conf_vals.shift(1).tolist()
 
         return pd.DataFrame(out)

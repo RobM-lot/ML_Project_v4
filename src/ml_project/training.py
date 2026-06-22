@@ -386,36 +386,29 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
 
 
 def _join_stand_features(df: DataFrame, spark, settings: FlightDelaySettings) -> DataFrame:
-    """Manual PIT join for stand tables (avoids SDK dict lookup_key bug).
+    """Equi-join for stand daily features (avoids SDK dict lookup_key bug).
 
-    Joins ft_stand_daily_out on (stand_id_out, event_date) and
-    ft_stand_daily_in on (stand_id_in, event_date) using asof join logic:
-    feature event_date <= base event_date (latest available before flight).
+    The ft_stand_daily_* tables contain one row per (stand_id, event_date) for every
+    day in the range (via markers in _build_stand_daily). Rolling stats on event_date D
+    are computed from data strictly BEFORE D, so equi-join on event_date gives correct
+    PIT semantics without inequality join explosion.
     """
-    from pyspark.sql import Window
-
-    def _pit_join_stand(base_df, stand_table, base_stand_col, suffix):
-        """PIT join: get latest stand features where stand.event_date <= base.event_date."""
+    def _equi_join_stand(base_df, stand_table, base_stand_col):
         stand_df = spark.read.table(stand_table)
-
-        # Exclude PK and days_since from stand features
         feature_cols = [c for c in stand_df.columns if c not in ("stand_id", "event_date", "days_since_last_event")]
-
-        # Join on stand_id match + stand.event_date <= base.event_date
-        joined = base_df.join(
-            stand_df.select("stand_id", "event_date", *feature_cols).withColumnRenamed("event_date", "_stand_event_date"),
-            on=(F.col(base_stand_col) == F.col("stand_id")) & (F.col("_stand_event_date") <= F.col("event_date")),
-            how="left",
+        stand_slim = stand_df.select(
+            F.col("stand_id").alias("_stand_id"),
+            F.col("event_date").alias("_stand_event_date"),
+            *feature_cols,
         )
+        return base_df.join(
+            stand_slim,
+            on=(F.col(base_stand_col) == F.col("_stand_id")) & (F.col("event_date") == F.col("_stand_event_date")),
+            how="left",
+        ).drop("_stand_id", "_stand_event_date")
 
-        # Keep only the LATEST stand row (max _stand_event_date per base row)
-        w = Window.partitionBy(base_df.columns).orderBy(F.col("_stand_event_date").desc())
-        joined = joined.withColumn("_rn", F.row_number().over(w)).filter(F.col("_rn") == 1).drop("_rn", "_stand_event_date", "stand_id")
-
-        return joined
-
-    df = _pit_join_stand(df, settings.FT_STAND_DAILY_OUT_TABLE, "stand_id_out", "out")
-    df = _pit_join_stand(df, settings.FT_STAND_DAILY_IN_TABLE, "stand_id_in", "in")
+    df = _equi_join_stand(df, settings.FT_STAND_DAILY_OUT_TABLE, "stand_id_out")
+    df = _equi_join_stand(df, settings.FT_STAND_DAILY_IN_TABLE, "stand_id_in")
     return df
 
 

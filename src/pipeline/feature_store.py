@@ -827,12 +827,12 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
     agg_exprs = []
     for src_col, prefix in target_cols_dict.items():
         agg_exprs.extend([
-            F.sum(src_col).alias(f"_sum_{prefix}"),
+            F.sum(F.col(src_col).cast("double")).alias(f"_sum_{prefix}"),
             F.count(src_col).alias(f"_cnt_{prefix}"),
-            F.min(src_col).alias(f"_min_{prefix}"),
-            F.max(src_col).alias(f"_max_{prefix}"),
-            F.sum(F.col(src_col) * F.col(src_col)).alias(f"_sumsq_{prefix}"),
-            F.expr(f"percentile_approx({src_col}, 0.9)").alias(f"_p90_{prefix}"),
+            F.min(F.col(src_col).cast("double")).alias(f"_min_{prefix}"),
+            F.max(F.col(src_col).cast("double")).alias(f"_max_{prefix}"),
+            F.sum(F.col(src_col).cast("double") * F.col(src_col).cast("double")).alias(f"_sumsq_{prefix}"),
+            F.expr(f"percentile_approx(CAST({src_col} AS DOUBLE), 0.9)").alias(f"_p90_{prefix}"),
         ])
     agg_exprs.append(F.count("*").alias("_fcnt"))
 
@@ -894,7 +894,12 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
             )
 
     internal = [c for c in daily.columns if c.startswith("_")]
-    return daily.drop(*internal)
+    daily = daily.drop(*internal)
+    # Reorder columns: entity_cols first, then event_date, then features (match DDL order)
+    ordered_cols = [c for c in daily.columns if c in entity_cols]
+    ordered_cols += ["event_date"]
+    ordered_cols += [c for c in daily.columns if c not in entity_cols and c != "event_date"]
+    return daily.select(*ordered_cols)
 
 
 def _build_stand_daily(df, is_taxi_out):
@@ -908,9 +913,9 @@ def _build_stand_daily(df, is_taxi_out):
 
     # Step 1: Daily aggregation per (airport, stand)
     daily = clean_df.groupBy("event_date", ap_col, stand_col).agg(
-        F.sum(target_col).alias("_sum"),
+        F.sum(F.col(target_col).cast("double")).alias("_sum"),
         F.count(target_col).alias("_cnt"),
-        F.sum(F.col(target_col) * F.col(target_col)).alias("_sumsq"),
+        F.sum(F.col(target_col).cast("double") * F.col(target_col).cast("double")).alias("_sumsq"),
         F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.1)").alias("_p10"),
         F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.5)").alias("_p50"),
         F.expr(f"percentile_approx(CAST({target_col} AS DOUBLE), 0.9)").alias("_p90"),

@@ -12,7 +12,7 @@ import mlflow
 import mlflow.pyfunc
 import numpy as np
 import pandas as pd
-from databricks.feature_engineering import FeatureEngineeringClient, FeatureFunction, FeatureLookup
+from databricks.feature_engineering import FeatureEngineeringClient, FeatureLookup
 from pyspark.sql import DataFrame
 from pyspark.sql import Window as W
 from pyspark.sql import functions as F
@@ -346,150 +346,70 @@ def finalize_model_df(df: DataFrame, keep_cols: list[str], target_cols: list[str
 
 
 def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
-    """Iter2 — FeatureLookups z nowych ft_* + FeatureFunction dla on-demand.
+    """FeatureLookups for rolling stats from ft_*_daily_* tables.
 
-    Klucze stand używają DICT form lookup_key (tabela.stand_id == base.stand_id_out/in),
-    bo nowe ft_stand_daily_* mają PK `stand_id`, a base df dostarcza stand_id_out/stand_id_in.
-    Zwraca 24 obiekty: 7 FeatureLookup (5 daily-stats + 2 timezone) + 17 FeatureFunction
-    (2 geo: distance_km/is_eastbound + 5 raw local time + 10 sin/cos = parytet z enriched() v9).
+    Architecture:
+    - Rolling stats (ft_*_daily_*) → FeatureLookup with PIT on event_date
+    - Timezone/geo/time/on-demand features → already in base df from enriched()
+      (NOT re-fetched via FeatureLookup → simpler feature_spec,
+       avoids SDK bug with dict lookup_key + rename_outputs)
+
+    days_since_last_event handling:
+    - taxi_out/taxi_in: list-key → rename_outputs to _dep/_arr
+    - route/stand: excluded via feature_names (avoids dict+rename SDK bug)
     """
-    ts_key = settings.FS_TIMESTAMP_KEY
+    ts_key = settings.FS_TIMESTAMP_KEY  # event_date
 
-    route_exclude = {"route_id", "event_date", "dep_ap_sched", "arr_ap_sched"}
+    # Route: exclude PK cols + days_since_last_event
+    route_exclude = {"route_id", "event_date", "dep_ap_sched", "arr_ap_sched", "days_since_last_event"}
     route_features = [
         c for c in spark.read.table(settings.FT_ROUTE_DAILY_STATS_TABLE).columns if c not in route_exclude
     ]
 
+    # Stand: explicit feature_names (all except PK + days_since_last_event)
+    _stand_exclude = {"stand_id", "event_date", "days_since_last_event"}
+    stand_out_features = [
+        c for c in spark.read.table(settings.FT_STAND_DAILY_OUT_TABLE).columns if c not in _stand_exclude
+    ]
+    stand_in_features = [
+        c for c in spark.read.table(settings.FT_STAND_DAILY_IN_TABLE).columns if c not in _stand_exclude
+    ]
+
     return [
+        # ===== Airport taxi out (list key → rename_outputs OK) =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_OUT),
             timestamp_lookup_key=ts_key,
             rename_outputs={"days_since_last_event": "days_since_last_event_dep"},
         ),
+        # ===== Route (list key → exclude days_since via feature_names) =====
         FeatureLookup(
             table_name=settings.FT_ROUTE_DAILY_STATS_TABLE,
             lookup_key=list(settings.PK_FT_ROUTE),
             feature_names=route_features,
             timestamp_lookup_key=ts_key,
-            rename_outputs={"days_since_last_event": "days_since_last_event_route"},
         ),
+        # ===== Airport taxi in (list key → rename_outputs OK) =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_IN_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_IN),
             timestamp_lookup_key=ts_key,
             rename_outputs={"days_since_last_event": "days_since_last_event_arr"},
         ),
+        # ===== Stand out (DICT key → feature_names, NO rename_outputs) =====
         FeatureLookup(
             table_name=settings.FT_STAND_DAILY_OUT_TABLE,
             lookup_key={"stand_id": "stand_id_out"},
+            feature_names=stand_out_features,
             timestamp_lookup_key=ts_key,
-            rename_outputs={"days_since_last_event": "days_since_last_event_stand_out"},
         ),
+        # ===== Stand in (DICT key → feature_names, NO rename_outputs) =====
         FeatureLookup(
             table_name=settings.FT_STAND_DAILY_IN_TABLE,
             lookup_key={"stand_id": "stand_id_in"},
+            feature_names=stand_in_features,
             timestamp_lookup_key=ts_key,
-            rename_outputs={"days_since_last_event": "days_since_last_event_stand_in"},
-        ),
-        FeatureLookup(
-            table_name=settings.FT_AIRPORT_TIMEZONE_TABLE,
-            lookup_key={"iata_ap_code": "dep_ap_sched"},
-            feature_names=["lat_deg", "lon_deg", "utc_offset_min"],
-            rename_outputs={"lat_deg": "dep_lat", "lon_deg": "dep_lon", "utc_offset_min": "dep_utc_offset_min"},
-            timestamp_lookup_key="dep_sched_dt",
-        ),
-        FeatureLookup(
-            table_name=settings.FT_AIRPORT_TIMEZONE_TABLE,
-            lookup_key={"iata_ap_code": "arr_ap_sched"},
-            feature_names=["lat_deg", "lon_deg", "utc_offset_min"],
-            rename_outputs={"lat_deg": "arr_lat", "lon_deg": "arr_lon", "utc_offset_min": "arr_utc_offset_min"},
-            timestamp_lookup_key="arr_sched_dt",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_HAVERSINE_KM,
-            input_bindings={"lat1": "dep_lat", "lon1": "dep_lon", "lat2": "arr_lat", "lon2": "arr_lon"},
-            output_name="distance_km",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_IS_EASTBOUND,
-            input_bindings={"lon1": "dep_lon", "lon2": "arr_lon"},
-            output_name="is_eastbound",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="local_hour_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="local_hour_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="local_dow_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="local_dow_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_MONTH_OF,
-            input_bindings={"scheduled_dt": "dep_sched_dt"},
-            output_name="month",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_SIN_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="sin_local_hour_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_COS_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="cos_local_hour_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_SIN_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="sin_local_hour_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_COS_LOCAL_HOUR,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="cos_local_hour_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_SIN_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="sin_local_dow_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_COS_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
-            output_name="cos_local_dow_dep",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_SIN_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="sin_local_dow_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_COS_LOCAL_DOW,
-            input_bindings={"scheduled_dt": "arr_sched_dt", "utc_offset_min": "arr_utc_offset_min"},
-            output_name="cos_local_dow_arr",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_SIN_MONTH_OF,
-            input_bindings={"scheduled_dt": "dep_sched_dt"},
-            output_name="sin_month",
-        ),
-        FeatureFunction(
-            udf_name=settings.UC_FN_COS_MONTH_OF,
-            input_bindings={"scheduled_dt": "dep_sched_dt"},
-            output_name="cos_month",
         ),
     ]
 
@@ -499,17 +419,8 @@ _FS_LOOKUP_HELPER_COLS = ["route_id", "stand_id_out", "stand_id_in"]
 # Columns that exist in base df (from enriched()) but are RE-ADDED by FeatureLookup
 # (ft_airport_timezone). Must be dropped from base df to avoid duplicate output names.
 _FS_COLS_TO_DROP_FROM_BASE = [
-    # Columns re-provided by FeatureLookup (ft_airport_timezone)
-    "dep_utc_offset_min", "arr_utc_offset_min",
-    "dep_lat", "dep_lon", "arr_lat", "arr_lon",
-    # Columns re-provided by FeatureFunction (on-demand)
-    "distance_km", "is_eastbound",
-    "local_hour_dep", "local_hour_arr", "local_dow_dep", "local_dow_arr", "month",
-    "sin_local_hour_dep", "cos_local_hour_dep",
-    "sin_local_hour_arr", "cos_local_hour_arr",
-    "sin_local_dow_dep", "cos_local_dow_dep",
-    "sin_local_dow_arr", "cos_local_dow_arr",
-    "sin_month", "cos_month",
+    # No longer need to drop geo/time columns — they stay in base df
+    # (FeatureLookup only adds rolling stats which don't exist in enriched)
 ]
 _FS_REQUIRED_LOOKUP_KEYS = ["dep_ap_sched", "route_id", "arr_ap_sched", "stand_id_out", "stand_id_in"]
 

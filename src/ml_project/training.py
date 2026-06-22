@@ -365,27 +365,32 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             table_name=settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_OUT),
             timestamp_lookup_key=ts_key,
+            rename_outputs={"days_since_last_event": "days_since_last_event_dep"},
         ),
         FeatureLookup(
             table_name=settings.FT_ROUTE_DAILY_STATS_TABLE,
             lookup_key=list(settings.PK_FT_ROUTE),
             feature_names=route_features,
             timestamp_lookup_key=ts_key,
+            rename_outputs={"days_since_last_event": "days_since_last_event_route"},
         ),
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_IN_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_IN),
             timestamp_lookup_key=ts_key,
+            rename_outputs={"days_since_last_event": "days_since_last_event_arr"},
         ),
         FeatureLookup(
             table_name=settings.FT_STAND_DAILY_OUT_TABLE,
             lookup_key={"stand_id": "stand_id_out"},
             timestamp_lookup_key=ts_key,
+            rename_outputs={"days_since_last_event": "days_since_last_event_stand_out"},
         ),
         FeatureLookup(
             table_name=settings.FT_STAND_DAILY_IN_TABLE,
             lookup_key={"stand_id": "stand_id_in"},
             timestamp_lookup_key=ts_key,
+            rename_outputs={"days_since_last_event": "days_since_last_event_stand_in"},
         ),
         FeatureLookup(
             table_name=settings.FT_AIRPORT_TIMEZONE_TABLE,

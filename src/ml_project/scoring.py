@@ -282,12 +282,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
             elif "timestamp" in t or "datetime" in t:
                 out = out.withColumn(c, F.col(c).cast("timestamp"))
 
-        # Dodaj brakujące kolumny signature
-        # (score_batch wymaga wszystkich kolumn z training df, nawet jeśli SHADOW_TABLE jest wąska).
-        # INT/LONG -> 0 (signature wymaga non-null), reszta -> NULL odpowiedniego typu.
-        # Iter2.5: kolumny local time (local_hour/dow/month + sin/cos) przyjdą z FeatureFunction,
-        # nie post-lookup. Jeśli są w signature, ten blok wstawi je jako NULL przed score_batch —
-        # score_batch nadpisze je przez FF. Zbędne, ale nieszkodliwe.
+
         for c, type_str in INPUT_TYPES.items():
             if c in out.columns:
                 continue
@@ -446,9 +441,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
                 .withColumn("pred_actual_block_time_p90_sec", _pred_expr("pred_actual_block_time_p90_sec"))
             )
 
-            # Iter2.5 Opcja A: local_hour/dow/month + sin/cos przychodzą z FeatureFunction przez
-            # score_batch (NIE post-lookup) -> brak train/serve skew. _add_local_time_cosine_features
-            # zostaje jako orphan (dead code, do iter2.5 cleanup).
+
 
             scored_df = scored_df.withColumn(
                 "pred_block_delay_sec", F.col("pred_actual_block_time_sec") - F.col("scheduled_block_time_sec")

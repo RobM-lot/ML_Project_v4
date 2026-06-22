@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Komórka 1 — Bootstrap
 import sys, glob
 _hits = glob.glob("/Workspace/Users/30002818@lot.pl/.bundle/**/src/ml_project/settings.py", recursive=True)
 SRC_PATH = [h for h in _hits if "/dev/" in h][0][:-len("/ml_project/settings.py")]
@@ -7,14 +6,11 @@ if SRC_PATH not in sys.path: sys.path.insert(0, SRC_PATH)
 import ml_project.settings as st
 SETTINGS = st.load_settings("dev", project_root=SRC_PATH[:-len("/src")],
     source_catalog_override="panda_silver_prod", source_schema_override="occ_ops")
-# Nazwy funkcji budujemy z silver catalog/schema (niezależnie od pól UC_FN_* w settings)
 SILVER_FULL = f"{SETTINGS.SILVER_CATALOG}.{SETTINGS.SILVER_SCHEMA}"
 print(f"✅ Bootstrap OK | target schema: {SILVER_FULL}")
 
 # COMMAND ----------
 
-# Komórka 2 — Definicje funkcji (ciała 1:1 z src/pipeline/on_demand_functions.py;
-# UC UDF nie woła innych UDF -> ciała sin/cos są INLINE, ale tożsame z helperami w .py)
 FUNCTIONS = [
     {
         "name": "sin_cos_hour",
@@ -52,7 +48,6 @@ FUNCTIONS = [
         "returns": "DOUBLE",
         "body": "if not actual_sec or not scheduled_sec or scheduled_sec == 0:\n    return None\nreturn float(actual_sec) / float(scheduled_sec)",
     },
-    # ===== Iter2.5 Opcja A — local time (bodies self-contained / inline) =====
     {
         "name": "local_hour",
         "params": "scheduled_dt TIMESTAMP, utc_offset_min INT",
@@ -112,7 +107,6 @@ print(f"{len(FUNCTIONS)} funkcji do rejestracji")
 
 # COMMAND ----------
 
-# Komórka 3 — Rejestracja (CREATE OR REPLACE FUNCTION ... LANGUAGE PYTHON)
 results = {}
 for fn in FUNCTIONS:
     full_name = f"{SILVER_FULL}.{fn['name']}"
@@ -136,7 +130,6 @@ for k, v in results.items():
 
 # COMMAND ----------
 
-# Komórka 4 — Weryfikacja: każda funkcja istnieje i liczy (test SELECT)
 smoke = {
     "sin_cos_hour": "SELECT {fn}(6).sin AS s, {fn}(6).cos AS c",
     "sin_cos_dow": "SELECT {fn}(3).sin AS s, {fn}(3).cos AS c",
@@ -144,7 +137,6 @@ smoke = {
     "haversine_km": "SELECT {fn}(52.16, 20.97, 50.07, 19.79) AS km",
     "is_eastbound": "SELECT {fn}(20.97, 19.79) AS eb",
     "duration_ratio": "SELECT {fn}(3600, 3000) AS r",
-    # Iter2.5 local time: 2026-06-09 14:00 UTC + 120 min (UTC+2) -> 16:00, wtorek(1), czerwiec(6)
     "local_hour": "SELECT {fn}(TIMESTAMP'2026-06-09 14:00:00', 120) AS h",
     "local_dow": "SELECT {fn}(TIMESTAMP'2026-06-09 14:00:00', 120) AS d",
     "month_of": "SELECT {fn}(TIMESTAMP'2026-06-09 14:00:00') AS m",
@@ -165,5 +157,4 @@ for name, q in smoke.items():
         print(f"❌ {name}: {str(e)[:200]}")
         all_ok = False
 
-# Oczekiwane sanity: local_hour=16, local_dow=1 (wtorek), month_of=6
 print("\n>>> WSZYSTKIE UDF DZIAŁAJĄ ✅" if all_ok else ">>> SPRAWDŹ BŁĘDY ❌")

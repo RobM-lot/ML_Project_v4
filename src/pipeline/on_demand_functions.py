@@ -1,14 +1,3 @@
-"""Iter2 — on-demand feature functions (UC Python UDF).
-
-Te funkcje zostaną zarejestrowane w Unity Catalog jako Python UDF
-(notebook notebooks/10_register_on_demand_functions.ipynb). FeatureFunction w
-training/scoring odwoła się do nich po nazwie UC — wartości NIE są materializowane,
-liczone w `fe.create_training_set` i `fe.score_batch`.
-
-Definicje tutaj są źródłem prawdy ciała UDF (notebook wstrzykuje je do
-CREATE FUNCTION ... LANGUAGE PYTHON). Czyste Python (tylko stdlib `math`),
-żeby były testowalne lokalnie i 1:1 z tym, co rejestrujemy w UC.
-"""
 import math
 from datetime import datetime, timedelta
 
@@ -56,15 +45,6 @@ def duration_ratio(actual_sec: int, scheduled_sec: int) -> float:
     if not actual_sec or not scheduled_sec or scheduled_sec == 0:
         return None
     return float(actual_sec) / float(scheduled_sec)
-
-
-# =====================================================================================
-# Iter2.5 (Opcja A) — local time features jako on-demand UDF.
-# Parytet z legacy enriched(): dep_local_ts = dep_sched_dt + utc_offset_min*60s.
-# UWAGA: w rejestracji UC (notebook 10) ciała sin/cos są INLINE (UC UDF nie woła innych
-# Python-symboli) — tutaj wołamy helper local_hour/local_dow/month_of dla czytelności/testów,
-# ale wynik jest tożsamy.
-# =====================================================================================
 
 
 def local_hour(scheduled_dt: datetime, utc_offset_min: int) -> int:

@@ -101,10 +101,6 @@ def stand_schema_ddl(*, is_taxi_out: bool) -> str:
     return _format_ddl(columns, constraint)
 
 
-# =====================================================================================
-# Iter2 — DDL dla nowego layoutu ft_*  (B2: EMA bez densyfikacji + days_since_last_event)
-# =====================================================================================
-
 def leg_status_schema_ddl() -> str:
     """DDL dla `ft_leg_status` — streaming ingest statusu lotu z df_labels.
 
@@ -224,7 +220,7 @@ def daily_stats_schema_ddl(
         for window in _TIME_WINDOWS:
             columns.append(f"delta_ema_avg_{prefix}_{window} DOUBLE")
 
-    columns.append("days_since_last_event DOUBLE")  # B2: luka dni od poprzedniego eventu encji
+    columns.append("days_since_last_event DOUBLE")
 
     constraint = (
         f"CONSTRAINT ft_{count_prefix}_daily_pk "
@@ -370,7 +366,6 @@ def v_cleaned_flight_data_full_table():
     df_leg_remark = spark.read.table("df_leg_remark")
     df_leg_misc = spark.read.table("df_leg_misc")
 
-    # TODO Iter2: usunąć filtr __END_AT po migracji na readStream
     base = (
         df_labels.filter(F.col("__END_AT").isNull())
         .filter(F.col("counter") == 0)
@@ -386,7 +381,6 @@ def v_cleaned_flight_data_full_table():
     )
     base = _add_marker_columns(base)
 
-    # TODO Iter2: usunąć filtr po migracji na readStream
     leg_times_raw = df_leg_times.filter(F.col("__END_AT").isNull())
     w_times = _latest_window(leg_times_raw, ["leg_no"])
     leg_times_latest = (
@@ -396,7 +390,6 @@ def v_cleaned_flight_data_full_table():
         .select("leg_no", "offblock_dt", "airborne_dt", "landing_dt", "onblock_dt")
     )
 
-    # leg_remark NIE ma __END_AT (brak SCD2 tracking) — bez filtra wersji.
     leg_remark_raw = df_leg_remark.filter(F.col("usage") == "F")
     w_remark = _latest_window(leg_remark_raw, ["leg_no", "usage"])
     leg_remark_latest = (
@@ -415,7 +408,6 @@ def v_cleaned_flight_data_full_table():
         .select("leg_no", "netline_eet_duration_min")
     )
 
-    # leg_misc NIE ma __END_AT (brak SCD2 tracking) — bez filtra wersji.
     leg_misc_base = df_leg_misc
     leg_misc_current = (
         leg_misc_base
@@ -702,15 +694,12 @@ def _get_ema_compute_function(entity_cols, target_cols_dict, count_prefix, ema_s
         for hl_name, hl_days in half_life_days.items():
             halflife_td = pd.Timedelta(days=hl_days)
 
-            # EMA for each target prefix
             for _, prefix in target_cols_dict.items():
                 col = f"daily_avg_{prefix}"
                 series = pdf[col].astype(float)
                 ema_vals = series.ewm(halflife=halflife_td, times=times).mean()
-                # Shift by 1: EMA at time t uses data up to t-1 (morning value)
                 out[f"ema_{prefix}_{hl_name}"] = ema_vals.shift(1).tolist()
 
-            # Confidence: EMA of daily count
             cnt_series = pdf["daily_cnt"].astype(float)
             conf_vals = cnt_series.ewm(halflife=halflife_td, times=times).mean()
             out[f"ema_confidence_{count_prefix}_{hl_name}"] = conf_vals.shift(1).tolist()
@@ -792,11 +781,9 @@ def _parse_coord_lon(col):
 
 @dp.table(name=_fs_table("ft_airport_timezone"), schema=airport_timezone_schema_ddl(), table_properties=DLT_TABLE_PROPERTIES)
 def ft_airport_timezone():
-    # stream-static join: ap_basics jako stream, time_zone jako statyczny broadcast.
     apb = _stream_source("netline___schedops__ap_basics")
     tzd = F.broadcast(spark.read.table(_source_table("netline___schedops__time_zone")))
     apt = apb.join(tzd, F.col("time_zone") == F.col("time_zone_code"), "left")
-    # lat/lon w STOPNIACH (degrees) — zgodnie z UDF haversine_km/is_eastbound (math.radians w środku).
     return (
         apt
         .withColumn("valid_ts", F.to_timestamp(F.col("valid_since")))
@@ -823,7 +810,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
         ),
     )
 
-    # Step 1: Pre-aggregate to daily level
     agg_exprs = []
     for src_col, prefix in target_cols_dict.items():
         agg_exprs.extend([
@@ -839,7 +825,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
     daily = df.groupBy("event_date", *entity_cols).agg(*agg_exprs)
     daily = daily.withColumn("_ets", F.unix_timestamp("event_date"))
 
-    # Step 2: Rolling windows on daily data
     w7 = Window.partitionBy(*entity_cols).orderBy("_ets").rangeBetween(-7 * SECONDS_IN_DAY, -1)
     w30 = Window.partitionBy(*entity_cols).orderBy("_ets").rangeBetween(-30 * SECONDS_IN_DAY, -1)
 
@@ -855,7 +840,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
             daily = daily.withColumn(f"max_{prefix}_{wn}", F.max(f"_max_{prefix}").over(w))
         daily = daily.withColumn(f"count_{count_prefix}_{wn}", F.sum("_fcnt").over(w).cast("double"))
 
-    # Trend + has_hist
     for _, prefix in target_cols_dict.items():
         daily = daily.withColumn(f"trend_{prefix}_7d", F.col(f"avg_{prefix}_7d") - F.col(f"avg_{prefix}_30d"))
     daily = (
@@ -864,7 +848,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
         .withColumn(f"has_hist_{count_prefix}_30d", F.when(F.col(f"count_{count_prefix}_30d") > 0, 1.0).otherwise(0.0))
     )
 
-    # days_since_last_event
     wg = Window.partitionBy(*entity_cols).orderBy("event_date")
     daily = (
         daily
@@ -875,7 +858,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
         .drop("_prev")
     )
 
-    # EMA (already operates on daily data)
     ema_input = daily.withColumn("day_num", F.datediff(F.col("event_date"), F.lit("1970-01-01")))
     for _, prefix in target_cols_dict.items():
         ema_input = ema_input.withColumn(f"daily_avg_{prefix}", F.col(f"_sum_{prefix}") / F.col(f"_cnt_{prefix}"))
@@ -895,7 +877,6 @@ def _build_daily_stats(df, entity_cols, target_cols_dict, count_prefix):
 
     internal = [c for c in daily.columns if c.startswith("_")]
     daily = daily.drop(*internal)
-    # Reorder columns: entity_cols first, then event_date, then features (match DDL order)
     ordered_cols = [c for c in daily.columns if c in entity_cols]
     ordered_cols += ["event_date"]
     ordered_cols += [c for c in daily.columns if c not in entity_cols and c != "event_date"]
@@ -911,7 +892,6 @@ def _build_stand_daily(df, is_taxi_out):
 
     clean_df = df.filter(F.col(stand_col).isNotNull() & (F.col(stand_col) != ""))
 
-    # Step 1: Daily aggregation per (airport, stand)
     daily = clean_df.groupBy("event_date", ap_col, stand_col).agg(
         F.sum(F.col(target_col).cast("double")).alias("_sum"),
         F.count(target_col).alias("_cnt"),
@@ -922,7 +902,6 @@ def _build_stand_daily(df, is_taxi_out):
     )
     daily = daily.withColumn("_ets", F.unix_timestamp("event_date"))
 
-    # Step 2: Rolling windows on daily data
     w7 = Window.partitionBy(ap_col, stand_col).orderBy("_ets").rangeBetween(-7 * SECONDS_IN_DAY, -1)
     w30 = Window.partitionBy(ap_col, stand_col).orderBy("_ets").rangeBetween(-30 * SECONDS_IN_DAY, -1)
 
@@ -946,7 +925,6 @@ def _build_stand_daily(df, is_taxi_out):
             F.col(f"stand_avg_taxi_{prefix}_7d") - F.col(f"stand_avg_taxi_{prefix}_30d"))
     )
 
-    # days_since_last_event
     wg = Window.partitionBy(ap_col, stand_col).orderBy("event_date")
     feat_df = (
         feat_df

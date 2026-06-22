@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Komórka 1 — Bootstrap
 import sys, glob
 _hits = glob.glob("/Workspace/Users/30002818@lot.pl/.bundle/**/src/ml_project/settings.py", recursive=True)
 SRC_PATH = [h for h in _hits if "/dev/" in h][0][:-len("/ml_project/settings.py")]
@@ -15,7 +14,6 @@ results = {}
 
 # COMMAND ----------
 
-# Komórka 2 — Check 1: 9 ft_* tabel istnieją; daily stats: count/has_hist/stand_count + days_since DOUBLE
 ft_all_tables = [
     SETTINGS.FT_LEG_STATUS_TABLE, SETTINGS.FT_LEG_TIMES_TABLE, SETTINGS.FT_LEG_MISC_TABLE,
     SETTINGS.FT_AIRPORT_TIMEZONE_TABLE, SETTINGS.FT_ROUTE_DAILY_STATS_TABLE,
@@ -30,14 +28,12 @@ expected_double_cols = {
     SETTINGS.FT_STAND_DAILY_IN_TABLE:         ["stand_count_in_7d", "stand_count_in_30d", "days_since_last_event"],
 }
 ok = True
-# (a) wszystkie 9 tabel ft_* istnieją
 for full in ft_all_tables:
     try:
         spark.table(full).schema
     except Exception as e:
         print(f"❌ brak tabeli {full}: {str(e)[:120]}")
         ok = False
-# (b) typy DOUBLE w daily stats (count/has_hist/stand_count + days_since_last_event)
 for full, cols in expected_double_cols.items():
     schema = {f.name: str(f.dataType) for f in spark.table(full).schema.fields}
     for c in cols:
@@ -49,7 +45,6 @@ print("✅ ft_* tables + DOUBLE + days_since_last_event OK" if ok else "❌ ft_*
 
 # COMMAND ----------
 
-# Komórka 3 — Check 2: Champion alias istnieje i wskazuje na model
 try:
     mv = client.get_model_version_by_alias(SETTINGS.UC_MODEL_NAME, "champion")
     print(f"✅ champion → v{mv.version}")
@@ -62,16 +57,13 @@ except Exception as e:
 
 # COMMAND ----------
 
-# Komórka 4 — Check 3: v10 signature ma 15 cech czasowych z FeatureFunction (Iter2.5 Opcja A)
 import json
 if CHAMPION_VERSION:
     info = mlflow.models.get_model_info(f"models:/{SETTINGS.UC_MODEL_NAME}/{CHAMPION_VERSION}")
     in_list = json.loads(info.signature.to_dict()["inputs"])
     names = {c["name"] for c in in_list}
     time_cols = [
-        # 5 raw
         "local_hour_dep", "local_dow_dep", "local_hour_arr", "local_dow_arr", "month",
-        # 10 cyclical
         "sin_local_hour_dep", "cos_local_hour_dep", "sin_local_hour_arr", "cos_local_hour_arr",
         "sin_local_dow_dep", "cos_local_dow_dep", "sin_local_dow_arr", "cos_local_dow_arr",
         "sin_month", "cos_month",
@@ -86,7 +78,6 @@ else:
 
 # COMMAND ----------
 
-# Komórka 5 — Check 4: score_batch na 50 wierszach
 from datetime import date, timedelta
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, DoubleType
@@ -134,7 +125,6 @@ else:
 
 # COMMAND ----------
 
-# Komórka 6 — Podsumowanie
 print("\n" + "="*60)
 print("SMOKE TEST SUMMARY")
 print("="*60)

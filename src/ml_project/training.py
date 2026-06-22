@@ -353,16 +353,14 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
     Zwraca 24 obiekty: 7 FeatureLookup (5 daily-stats + 2 timezone) + 17 FeatureFunction
     (2 geo: distance_km/is_eastbound + 5 raw local time + 10 sin/cos = parytet z enriched() v9).
     """
-    ts_key = settings.FS_TIMESTAMP_KEY  # event_date (TIMESERIES daily stats)
+    ts_key = settings.FS_TIMESTAMP_KEY
 
-    # ft_route_daily_stats ma entity cols dep_ap_sched/arr_ap_sched (kolizja z base) -> wyklucz.
     route_exclude = {"route_id", "event_date", "dep_ap_sched", "arr_ap_sched"}
     route_features = [
         c for c in spark.read.table(settings.FT_ROUTE_DAILY_STATS_TABLE).columns if c not in route_exclude
     ]
 
     return [
-        # ===== Daily stats (PIT po event_date) =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_OUT),
@@ -379,7 +377,6 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             lookup_key=list(settings.PK_FT_AIRPORT_TAXI_IN),
             timestamp_lookup_key=ts_key,
         ),
-        # stand: DICT form (tabela.stand_id == base.stand_id_out/in)
         FeatureLookup(
             table_name=settings.FT_STAND_DAILY_OUT_TABLE,
             lookup_key={"stand_id": "stand_id_out"},
@@ -390,7 +387,6 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             lookup_key={"stand_id": "stand_id_in"},
             timestamp_lookup_key=ts_key,
         ),
-        # ===== Airport timezone (lat/lon w STOPNIACH + utc_offset), PIT po dep/arr_sched_dt =====
         FeatureLookup(
             table_name=settings.FT_AIRPORT_TIMEZONE_TABLE,
             lookup_key={"iata_ap_code": "dep_ap_sched"},
@@ -405,7 +401,6 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             rename_outputs={"lat_deg": "arr_lat", "lon_deg": "arr_lon", "utc_offset_min": "arr_utc_offset_min"},
             timestamp_lookup_key="arr_sched_dt",
         ),
-        # ===== On-demand (FeatureFunction) =====
         FeatureFunction(
             udf_name=settings.UC_FN_HAVERSINE_KM,
             input_bindings={"lat1": "dep_lat", "lon1": "dep_lon", "lat2": "arr_lat", "lon2": "arr_lon"},
@@ -416,14 +411,6 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             input_bindings={"lon1": "dep_lon", "lon2": "arr_lon"},
             output_name="is_eastbound",
         ),
-        # NOTE: duration_ratio FeatureFunction usunięta (LEAKAGE — input = actual_block_time_sec/label).
-        # Orphans do iter2.5 cleanup: on_demand_functions.duration_ratio, settings.UC_FN_DURATION_RATIO,
-        # rejestracja w notebooks/10. Patrz docs/iter2_progress.md.
-
-        # ===== Local time (Iter2.5 Opcja A): 5 raw + 10 cyclical = parytet z enriched() v9.
-        # Liczone przez FeatureFunction (NIE post-lookup) -> brak train/serve skew; score_batch
-        # dostarcza je do modelu, signature je widzi. utc_offset z timezone lookupu powyżej.
-        # Raw
         FeatureFunction(
             udf_name=settings.UC_FN_LOCAL_HOUR,
             input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
@@ -449,7 +436,6 @@ def _build_feature_lookups(spark, settings: FlightDelaySettings) -> List[Any]:
             input_bindings={"scheduled_dt": "dep_sched_dt"},
             output_name="month",
         ),
-        # Cyclical (sin/cos)
         FeatureFunction(
             udf_name=settings.UC_FN_SIN_LOCAL_HOUR,
             input_bindings={"scheduled_dt": "dep_sched_dt", "utc_offset_min": "dep_utc_offset_min"},
@@ -589,8 +575,6 @@ def build_training_datasets(spark, settings: FlightDelaySettings) -> Dict[str, A
     training_set = _create_fs_training_set(fe, labels_with_id, settings, spark)
     joined_all = training_set.load_df()
 
-    # Iter2.5 Opcja A: sin/cos + local_hour/dow/month dostarczane przez FeatureFunction w
-    # _build_feature_lookups (są już w joined_all), NIE post-lookup -> brak train/serve skew.
 
     cardinality = joined_all.agg(
         F.count("*").alias("rows_after_join"),
@@ -1100,8 +1084,6 @@ def run_train_compare_models(spark, settings: FlightDelaySettings) -> Dict[str, 
         )
 
         
-
-        # Punkt F: Feature importance — 8 sub-modeli (4 segmenty × p50/p90)
         _importance_payload = {}
         for _seg_name, _best_obj in [("taxi_out", best_out), ("airborne", best_air), ("taxi_in", best_in), ("block", best_block)]:
             _feat_list = _best_obj["final_features"]

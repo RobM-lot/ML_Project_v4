@@ -224,6 +224,21 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
 
     INPUT_COLS, INPUT_TYPES, OUTPUT_COLS, OUTPUT_TYPES = get_model_signature_io(settings.MODEL_URI)
 
+    # Identify columns that come from feature_store (populated by score_batch via feature lookup).
+    # These must NOT be pre-added to the df — score_batch skips lookup if column already exists.
+    import yaml as _yaml
+    _fe_spec_path = mlflow.artifacts.download_artifacts(
+        artifact_uri=f"{settings.MODEL_URI}/data/feature_store/feature_spec.yaml"
+    )
+    with open(_fe_spec_path, "r") as _f:
+        _fe_spec = _yaml.safe_load(_f.read())
+    _FS_COLUMNS = set()
+    for _col_dict in _fe_spec.get("input_columns", []):
+        for _col_name, _col_info in _col_dict.items():
+            if _col_info.get("source") == "feature_store":
+                _FS_COLUMNS.add(_col_name)
+    del _fe_spec, _fe_spec_path
+
     out_schema = StructType(
         [
             StructField(col_name, mlflow_type_to_spark_dtype(OUTPUT_TYPES.get(col_name, "double")), True)
@@ -250,6 +265,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
         base_present = [
             c for c in INPUT_COLS
             if c in out.columns and not c.startswith("marker_") and "stand_" not in c
+            and c not in _FS_COLUMNS
         ]
         if base_present:
             null_checks = [F.when(F.col(c).isNull(), 1).otherwise(0) for c in base_present]
@@ -283,8 +299,12 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
                 out = out.withColumn(c, F.col(c).cast("timestamp"))
 
 
+        # Skip feature_store columns — score_batch will populate them via feature lookup.
+        # Adding them here as NULL would prevent score_batch from querying feature tables.
         for c, type_str in INPUT_TYPES.items():
             if c in out.columns:
+                continue
+            if c in _FS_COLUMNS:
                 continue
             t = type_str.lower()
             if "long" in t:

@@ -124,6 +124,10 @@ def prepare_model_input(pdf: pd.DataFrame) -> pd.DataFrame:
             prepared[col] = pd.to_numeric(prepared[col], errors='coerce').astype("float64")
         elif "string" in expected_type:
             prepared[col] = prepared[col].fillna("UNKNOWN").astype(str)
+        elif "datetime" in expected_type or "timestamp" in expected_type:
+            prepared[col] = pd.to_datetime(prepared[col], errors='coerce')
+        elif "boolean" in expected_type or "bool" in expected_type:
+            prepared[col] = prepared[col].fillna(False).astype(bool)
 
     return prepared[MODEL_INPUT_COLS].copy()
 
@@ -983,6 +987,7 @@ plt.show()
     
     
     
+
 
 
 

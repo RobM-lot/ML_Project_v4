@@ -440,18 +440,23 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
             )
         )
 
-        # Cap event_date to max available in feature tables.
+        # Cap event_date to MIN of max dates across ALL required feature tables.
         # score_batch uses exact-match on event_date (TIMESERIES PIT not recognized for MVs).
-        # Without this, future flights (event_date > max feature date) get NULL features.
-        _max_feature_date = (
-            spark.read.table(settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE)
-            .agg(F.max("event_date"))
-            .first()[0]
-        )
-        if _max_feature_date:
+        # Using MIN ensures every table has a matching row for the capped date.
+        _max_dates = []
+        for _ft_table in [
+            settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,
+            settings.FT_ROUTE_DAILY_STATS_TABLE,
+            settings.FT_AIRPORT_DAILY_TAXI_IN_TABLE,
+        ]:
+            _d = spark.read.table(_ft_table).agg(F.max("event_date")).first()[0]
+            if _d:
+                _max_dates.append(_d)
+        if _max_dates:
+            _safe_max_date = min(_max_dates)
             batch_prep = batch_prep.withColumn(
                 "event_date",
-                F.least(F.col("event_date"), F.lit(_max_feature_date)),
+                F.least(F.col("event_date"), F.lit(_safe_max_date)),
             )
 
         try:

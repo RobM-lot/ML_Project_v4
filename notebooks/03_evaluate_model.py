@@ -1,4 +1,7 @@
 # Databricks notebook source
+import os
+from types import SimpleNamespace
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,6 +11,7 @@ mlflow.set_tracking_uri("databricks")
 from pyspark.sql import functions as F
 from sklearn.metrics import mean_absolute_error
 from IPython.display import display
+from ml_project.training import UltimateSegmentedModel
 
 sns.set_theme(style="whitegrid")
 
@@ -101,10 +105,60 @@ def resolve_model_reference():
 
 run_id, model_uri, model_source_resolved = resolve_model_reference()
 print(f"Pobieranie modelu do ewaluacji | source={model_source_resolved} | run_id={run_id}")
-print("Evaluation prediction mode: pyfunc_on_materialized_eval_dataset")
-model = mlflow.pyfunc.load_model(model_uri)
+print("Evaluation prediction mode: plain_segmented_model_on_materialized_eval_dataset")
+plain_model_uri = f"runs:/{run_id}/model"
+print(f"Plain model artifact URI: {plain_model_uri}")
 
-model_info = mlflow.models.get_model_info(model_uri)
+_PLAIN_MODEL_ARTIFACTS = {
+    "payload": "payload.json",
+    "model_out_p50": "m_out_p50.pkl",
+    "model_air_p50": "m_air_p50.pkl",
+    "model_in_p50": "m_in_p50.pkl",
+    "model_block_p50": "m_block_p50.pkl",
+    "model_out_p90": "m_out_p90.pkl",
+    "model_air_p90": "m_air_p90.pkl",
+    "model_in_p90": "m_in_p90.pkl",
+    "model_block_p90": "m_block_p90.pkl",
+}
+
+def _find_model_artifact(root_dir: str, filename: str) -> str | None:
+    matches = []
+    for dirpath, _dirnames, filenames in os.walk(root_dir):
+        if filename in filenames:
+            matches.append(os.path.join(dirpath, filename))
+    if not matches:
+        return None
+    return sorted(matches, key=lambda path: (path.count(os.sep), path))[0]
+
+def load_plain_segmented_model(model_uri: str) -> UltimateSegmentedModel:
+    local_model_dir = mlflow.artifacts.download_artifacts(artifact_uri=model_uri)
+    artifacts = {}
+    missing = []
+    for artifact_key, filename in _PLAIN_MODEL_ARTIFACTS.items():
+        artifact_path = _find_model_artifact(local_model_dir, filename)
+        if artifact_path is None:
+            missing.append(filename)
+        else:
+            artifacts[artifact_key] = artifact_path
+
+    if missing:
+        visible_files = []
+        for dirpath, _dirnames, filenames in os.walk(local_model_dir):
+            for filename in filenames:
+                if filename == "MLmodel" or filename.endswith((".json", ".pkl", ".yaml", ".yml")):
+                    visible_files.append(os.path.relpath(os.path.join(dirpath, filename), local_model_dir))
+        raise RuntimeError(
+            "Nie znaleziono artefaktów plain modelu wymaganych do ewaluacji bez Feature Engineering wrappera. "
+            f"Brakujące: {missing}. Widoczne pliki diagnostycznie: {visible_files[:80]}"
+        )
+
+    plain_model = UltimateSegmentedModel()
+    plain_model.load_context(SimpleNamespace(artifacts=artifacts))
+    return plain_model
+
+model = load_plain_segmented_model(plain_model_uri)
+
+model_info = mlflow.models.get_model_info(plain_model_uri)
 MODEL_INPUT_COLS = [spec.name for spec in model_info.signature.inputs.inputs]
 
 def _schema_specs(schema_obj):
@@ -181,7 +235,7 @@ def score_frame(pdf, scope_name):
         return pdf
 
     model_input = prepare_model_input(pdf, scope_name)
-    preds = model.predict(model_input)
+    preds = model.predict(None, model_input)
     if not isinstance(preds, pd.DataFrame):
         pred_arr = np.asarray(preds)
         if pred_arr.ndim == 1:
@@ -1039,5 +1093,3 @@ plt.show()
     
     
     
-
-

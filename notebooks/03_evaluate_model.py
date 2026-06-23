@@ -106,8 +106,35 @@ model = mlflow.pyfunc.load_model(model_uri)
 model_info = mlflow.models.get_model_info(model_uri)
 MODEL_INPUT_COLS = [spec.name for spec in model_info.signature.inputs.inputs]
 
+def _add_fs_lookup_keys(pdf: pd.DataFrame) -> pd.DataFrame:
+    lookup_pdf = pdf.copy()
+
+    if "route_id" not in lookup_pdf.columns and {"dep_ap_sched", "arr_ap_sched"}.issubset(lookup_pdf.columns):
+        lookup_pdf["route_id"] = (
+            lookup_pdf["dep_ap_sched"].fillna("UNKNOWN").astype(str)
+            + "_"
+            + lookup_pdf["arr_ap_sched"].fillna("UNKNOWN").astype(str)
+        )
+
+    if "stand_id_out" not in lookup_pdf.columns and {"dep_ap_sched", "dep_stand"}.issubset(lookup_pdf.columns):
+        lookup_pdf["stand_id_out"] = (
+            lookup_pdf["dep_ap_sched"].fillna("UNKNOWN").astype(str)
+            + "_"
+            + lookup_pdf["dep_stand"].fillna("UNKNOWN").astype(str)
+        )
+
+    if "stand_id_in" not in lookup_pdf.columns and {"arr_ap_sched", "arr_stand"}.issubset(lookup_pdf.columns):
+        lookup_pdf["stand_id_in"] = (
+            lookup_pdf["arr_ap_sched"].fillna("UNKNOWN").astype(str)
+            + "_"
+            + lookup_pdf["arr_stand"].fillna("UNKNOWN").astype(str)
+        )
+
+    return lookup_pdf
+
+
 def prepare_model_input(pdf: pd.DataFrame) -> pd.DataFrame:
-    prepared = pdf.copy()
+    prepared = _add_fs_lookup_keys(pdf)
 
     for spec in model_info.signature.inputs.inputs:
         col = spec.name

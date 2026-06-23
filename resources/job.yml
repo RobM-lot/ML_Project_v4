@@ -11,7 +11,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 1800
           notebook_task:
-            notebook_path: ../notebooks/04_environment_check.ipynb
+            notebook_path: ../notebooks/04_environment_check.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -30,7 +30,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 14400
           notebook_task:
-            notebook_path: ../notebooks/01_cdf_stream.ipynb
+            notebook_path: ../notebooks/01_cdf_stream.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -52,7 +52,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 3600
           notebook_task:
-            notebook_path: ../notebooks/06_prediction_audit_monitoring.ipynb
+            notebook_path: ../notebooks/06_prediction_audit_monitoring.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -73,7 +73,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 1800
           notebook_task:
-            notebook_path: ../notebooks/04_environment_check.ipynb
+            notebook_path: ../notebooks/04_environment_check.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -92,7 +92,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 10800
           notebook_task:
-            notebook_path: ../notebooks/01_build_training_set.ipynb
+            notebook_path: ../notebooks/01_build_training_set.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -111,7 +111,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 21600
           notebook_task:
-            notebook_path: ../notebooks/01_train_compare_models.ipynb
+            notebook_path: ../notebooks/01_train_compare_models.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -130,7 +130,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 1800
           notebook_task:
-            notebook_path: ../notebooks/05_quality_gate_check.ipynb
+            notebook_path: ../notebooks/05_quality_gate_check.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -153,7 +153,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 1800
           notebook_task:
-            notebook_path: ../notebooks/02_register_best.ipynb
+            notebook_path: ../notebooks/02_register_best.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -176,7 +176,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 5400
           notebook_task:
-            notebook_path: ../notebooks/03_evaluate_model.ipynb
+            notebook_path: ../notebooks/03_evaluate_model.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -199,7 +199,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 3600
           notebook_task:
-            notebook_path: ../notebooks/07_route_fs_coverage_diagnostics.ipynb
+            notebook_path: ../notebooks/07_route_fs_coverage_diagnostics.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -220,7 +220,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 1800
           notebook_task:
-            notebook_path: ../notebooks/04_environment_check.ipynb
+            notebook_path: ../notebooks/04_environment_check.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}
@@ -239,7 +239,7 @@ resources:
           retry_on_timeout: false
           timeout_seconds: 14400
           notebook_task:
-            notebook_path: ../notebooks/01_cdf_stream.ipynb
+            notebook_path: ../notebooks/01_cdf_stream.py
             base_parameters:
               ENV: ${var.runtime_env}
               SOURCE_CATALOG: ${var.source_catalog}

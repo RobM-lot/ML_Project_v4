@@ -92,9 +92,9 @@ mp.configure_runtime(SETTINGS, spark=spark)
 print("ENV:", SETTINGS.ENV)
 print("MODEL_URI:", SETTINGS.MODEL_URI)
 print("SINK_TABLE:", SETTINGS.SINK_TABLE)
-print("FS_TAXI_OUT_TABLE:", SETTINGS.FS_TAXI_OUT_TABLE)
-print("FS_AIRBORNE_TABLE:", SETTINGS.FS_AIRBORNE_TABLE)
-print("FS_TAXI_IN_TABLE:", SETTINGS.FS_TAXI_IN_TABLE)
+print("FT_AIRPORT_DAILY_TAXI_OUT_TABLE:", SETTINGS.FT_AIRPORT_DAILY_TAXI_OUT_TABLE)
+print("FT_ROUTE_DAILY_STATS_TABLE:", SETTINGS.FT_ROUTE_DAILY_STATS_TABLE)
+print("FT_AIRPORT_DAILY_TAXI_IN_TABLE:", SETTINGS.FT_AIRPORT_DAILY_TAXI_IN_TABLE)
 
 # COMMAND ----------
 
@@ -236,7 +236,7 @@ base = (
         .withColumn("_row_id", F.monotonically_increasing_id())
 )
 
-max_fs_row = spark.table(SETTINGS.FS_TAXI_OUT_TABLE).select(F.max("event_date").alias("max_event_date")).first()
+max_fs_row = spark.table(SETTINGS.FT_AIRPORT_DAILY_TAXI_OUT_TABLE).select(F.max("event_date").alias("max_event_date")).first()
 max_fs_date = max_fs_row["max_event_date"] if max_fs_row and max_fs_row["max_event_date"] else None
 
 if max_fs_date is not None:
@@ -249,9 +249,9 @@ print("Max route FS event_date:", max_fs_date)
 
 # COMMAND ----------
 
-fs_out = spark.table(SETTINGS.FS_TAXI_OUT_TABLE)
-fs_air = spark.table(SETTINGS.FS_AIRBORNE_TABLE)
-fs_in = spark.table(SETTINGS.FS_TAXI_IN_TABLE)
+fs_out = spark.table(SETTINGS.FT_AIRPORT_DAILY_TAXI_OUT_TABLE)
+fs_air = spark.table(SETTINGS.FT_ROUTE_DAILY_STATS_TABLE)
+fs_in = spark.table(SETTINGS.FT_AIRPORT_DAILY_TAXI_IN_TABLE)
 
 def _route_fs_value_cols(fs_df, join_cols, time_key):
     base_exclusions = set(join_cols) | {time_key}

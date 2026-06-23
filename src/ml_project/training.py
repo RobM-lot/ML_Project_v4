@@ -512,6 +512,8 @@ def build_training_datasets(spark, settings: FlightDelaySettings) -> Dict[str, A
     training_set = _create_fs_training_set(fe, labels_with_id, settings, spark)
     joined_all = training_set.load_df()
 
+    # Add stand features via manual equi-join (not in feature_spec due to SDK dict-key bug)
+    joined_all = _add_stand_features_post_lookup(joined_all, spark, settings)
 
     cardinality = joined_all.agg(
         F.count("*").alias("rows_after_join"),

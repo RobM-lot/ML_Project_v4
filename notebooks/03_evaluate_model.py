@@ -11,7 +11,6 @@ mlflow.set_tracking_uri("databricks")
 from pyspark.sql import functions as F
 from sklearn.metrics import mean_absolute_error
 from IPython.display import display
-from ml_project.training import UltimateSegmentedModel
 
 sns.set_theme(style="whitegrid")
 
@@ -33,6 +32,10 @@ except Exception:
 # COMMAND ----------
 
 # MAGIC %run ./config
+
+# COMMAND ----------
+
+from ml_project.training import UltimateSegmentedModel
 
 # COMMAND ----------
 

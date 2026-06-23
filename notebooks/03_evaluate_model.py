@@ -101,10 +101,18 @@ def resolve_model_reference():
 
 run_id, model_uri, model_source_resolved = resolve_model_reference()
 print(f"Pobieranie modelu do ewaluacji | source={model_source_resolved} | run_id={run_id}")
+print("Evaluation prediction mode: pyfunc_on_materialized_eval_dataset")
 model = mlflow.pyfunc.load_model(model_uri)
 
 model_info = mlflow.models.get_model_info(model_uri)
 MODEL_INPUT_COLS = [spec.name for spec in model_info.signature.inputs.inputs]
+
+def _schema_specs(schema_obj):
+    if schema_obj is None:
+        return []
+    return getattr(schema_obj, "inputs", schema_obj)
+
+MODEL_OUTPUT_COLS = [spec.name for spec in _schema_specs(model_info.signature.outputs)]
 
 def _add_fs_lookup_keys(pdf: pd.DataFrame) -> pd.DataFrame:
     lookup_pdf = pdf.copy()
@@ -133,14 +141,16 @@ def _add_fs_lookup_keys(pdf: pd.DataFrame) -> pd.DataFrame:
     return lookup_pdf
 
 
-def prepare_model_input(pdf: pd.DataFrame) -> pd.DataFrame:
+def prepare_model_input(pdf: pd.DataFrame, scope_name: str) -> pd.DataFrame:
     prepared = _add_fs_lookup_keys(pdf)
+    missing_signature_cols = []
 
     for spec in model_info.signature.inputs.inputs:
         col = spec.name
         expected_type = str(spec.type).lower()
 
         if col not in prepared.columns:
+            missing_signature_cols.append(col)
             prepared[col] = np.nan
 
         if "long" in expected_type:
@@ -156,14 +166,29 @@ def prepare_model_input(pdf: pd.DataFrame) -> pd.DataFrame:
         elif "boolean" in expected_type or "bool" in expected_type:
             prepared[col] = prepared[col].fillna(False).astype(bool)
 
+    if missing_signature_cols:
+        preview = ", ".join(missing_signature_cols[:20])
+        suffix = "" if len(missing_signature_cols) <= 20 else f", ... (+{len(missing_signature_cols) - 20})"
+        print(
+            f"[WARN] {scope_name}: brakujące kolumny signature uzupełnione wartościami domyślnymi "
+            f"({len(missing_signature_cols)}): {preview}{suffix}"
+        )
+
     return prepared[MODEL_INPUT_COLS].copy()
 
 def score_frame(pdf, scope_name):
     if pdf.empty:
         return pdf
 
-    model_input = prepare_model_input(pdf)
+    model_input = prepare_model_input(pdf, scope_name)
     preds = model.predict(model_input)
+    if not isinstance(preds, pd.DataFrame):
+        pred_arr = np.asarray(preds)
+        if pred_arr.ndim == 1:
+            columns = MODEL_OUTPUT_COLS[:1] if len(MODEL_OUTPUT_COLS) == 1 else None
+        else:
+            columns = MODEL_OUTPUT_COLS if len(MODEL_OUTPUT_COLS) == pred_arr.shape[1] else None
+        preds = pd.DataFrame(pred_arr, index=model_input.index, columns=columns)
 
     eval_df = pdf.copy()
 
@@ -1014,7 +1039,5 @@ plt.show()
     
     
     
-
-
 
 

@@ -1084,15 +1084,3 @@ axes[1, 1].tick_params(axis='x', rotation=45)
 
 plt.tight_layout()
 plt.show()
-
-# COMMAND ----------
-
-
-
-
-
-
-    
-    
-    
-    

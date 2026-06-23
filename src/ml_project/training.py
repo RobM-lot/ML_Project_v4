@@ -414,11 +414,8 @@ def _join_stand_features(df: DataFrame, spark, settings: FlightDelaySettings) ->
 
 _FS_LOOKUP_HELPER_COLS = ["route_id", "stand_id_out", "stand_id_in"]
 
-# Columns that exist in base df (from enriched()) but are RE-ADDED by FeatureLookup
-# (ft_airport_timezone). Must be dropped from base df to avoid duplicate output names.
+
 _FS_COLS_TO_DROP_FROM_BASE = [
-    # No longer need to drop geo/time columns — they stay in base df
-    # (FeatureLookup only adds rolling stats which don't exist in enriched)
 ]
 _FS_REQUIRED_LOOKUP_KEYS = ["dep_ap_sched", "route_id", "arr_ap_sched", "stand_id_out", "stand_id_in"]
 
@@ -443,7 +440,6 @@ def _base_training_df(spark, settings: FlightDelaySettings) -> DataFrame:
 
 
 def _create_fs_training_set(fe: FeatureEngineeringClient, base_df: DataFrame, settings: FlightDelaySettings, spark):
-    # Step 1: FeatureLookup for airport/route tables (list-key, no SDK issues)
     training_set = fe.create_training_set(
         df=base_df,
         feature_lookups=_build_feature_lookups(spark, settings),
@@ -455,7 +451,6 @@ def _create_fs_training_set(fe: FeatureEngineeringClient, base_df: DataFrame, se
 
 def _add_stand_features_post_lookup(df: DataFrame, spark, settings: FlightDelaySettings) -> DataFrame:
     """Add stand features via manual PIT join (post create_training_set)."""
-    # Re-create stand_id columns (excluded from training_set.load_df() output)
     df = (
         df.withColumn("stand_id_out", F.concat_ws("_", F.col("dep_ap_sched"), F.col("dep_stand")))
         .withColumn("stand_id_in", F.concat_ws("_", F.col("arr_ap_sched"), F.col("arr_stand")))
@@ -518,7 +513,6 @@ def build_training_datasets(spark, settings: FlightDelaySettings) -> Dict[str, A
     training_set = _create_fs_training_set(fe, labels_with_id, settings, spark)
     joined_all = training_set.load_df()
 
-    # Add stand features via manual equi-join (not in feature_spec due to SDK dict-key bug)
     joined_all = _add_stand_features_post_lookup(joined_all, spark, settings)
 
     cardinality = joined_all.agg(

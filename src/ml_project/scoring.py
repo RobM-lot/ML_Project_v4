@@ -224,8 +224,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
 
     INPUT_COLS, INPUT_TYPES, OUTPUT_COLS, OUTPUT_TYPES = get_model_signature_io(settings.MODEL_URI)
 
-    # Identify columns that come from feature_store (populated by score_batch via feature lookup).
-    # These must NOT be pre-added to the df — score_batch skips lookup if column already exists.
+
     import yaml as _yaml
     _fe_spec_path = mlflow.artifacts.download_artifacts(
         artifact_uri=f"{settings.MODEL_URI}/data/feature_store/feature_spec.yaml"
@@ -299,8 +298,6 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
                 out = out.withColumn(c, F.col(c).cast("timestamp"))
 
 
-        # Skip feature_store columns — score_batch will populate them via feature lookup.
-        # Adding them here as NULL would prevent score_batch from querying feature tables.
         for c, type_str in INPUT_TYPES.items():
             if c in out.columns:
                 continue
@@ -440,9 +437,7 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
             )
         )
 
-        # Cap event_date to MIN of max dates across ALL required feature tables.
-        # score_batch uses exact-match on event_date (TIMESERIES PIT not recognized for MVs).
-        # Using MIN ensures every table has a matching row for the capped date.
+        
         _max_dates = []
         for _ft_table in [
             settings.FT_AIRPORT_DAILY_TAXI_OUT_TABLE,

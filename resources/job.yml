@@ -41,7 +41,7 @@ resources:
               GOLD_SCHEMA: ${var.gold_schema}
               RUN_BOOTSTRAP: "True"
               RESET_CHECKPOINT: "False"
-              STARTING_VERSION: ""
+              STARTING_VERSION: "16"
 
         - task_key: prediction_audit_monitoring
           depends_on:
@@ -250,4 +250,4 @@ resources:
               GOLD_SCHEMA: ${var.gold_schema}
               RUN_BOOTSTRAP: "True"
               RESET_CHECKPOINT: "True"
-              STARTING_VERSION: ""
+              STARTING_VERSION: "16"

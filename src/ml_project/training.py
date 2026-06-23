@@ -455,7 +455,13 @@ def _create_fs_training_set(fe: FeatureEngineeringClient, base_df: DataFrame, se
 
 def _add_stand_features_post_lookup(df: DataFrame, spark, settings: FlightDelaySettings) -> DataFrame:
     """Add stand features via manual PIT join (post create_training_set)."""
-    return _join_stand_features(df, spark, settings)
+    # Re-create stand_id columns (excluded from training_set.load_df() output)
+    df = (
+        df.withColumn("stand_id_out", F.concat_ws("_", F.col("dep_ap_sched"), F.col("dep_stand")))
+        .withColumn("stand_id_in", F.concat_ws("_", F.col("arr_ap_sched"), F.col("arr_stand")))
+    )
+    df = _join_stand_features(df, spark, settings)
+    return df.drop("stand_id_out", "stand_id_in")
 
 
 def _assert_lookup_contract(base_df: DataFrame, settings: FlightDelaySettings) -> None:

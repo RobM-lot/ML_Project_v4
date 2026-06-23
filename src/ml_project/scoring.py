@@ -637,6 +637,11 @@ def run_cdf_scoring(spark, dbutils, settings: "FlightDelaySettings") -> Dict[str
                 s.source_commit_version = t.source_commit_version
                 AND COALESCE(t.batch_id, -1) < COALESCE(s.batch_id, -1)
             )
+            OR (
+                s.source_commit_version = t.source_commit_version
+                AND COALESCE(t.batch_id, -1) = COALESCE(s.batch_id, -1)
+                AND COALESCE(t.scored_at, TIMESTAMP '1970-01-01') < COALESCE(s.scored_at, TIMESTAMP '1970-01-01')
+            )
             """
 
             (

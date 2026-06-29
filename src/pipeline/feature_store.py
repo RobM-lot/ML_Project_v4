@@ -269,6 +269,13 @@ MAX_VALID_TAXI_IN_SEC = 2 * 3600
 MAX_SEGMENT_SUM_GAP_SEC = 15 * 60
 
 DLT_TABLE_PROPERTIES = {"delta.enableDeletionVectors": "true"}
+FINAL_DAILY_FEATURE_TRIGGER_INTERVAL = "1 hour"
+FINAL_DAILY_FEATURE_TABLE_PROPERTIES = {
+    **DLT_TABLE_PROPERTIES,
+}
+FINAL_DAILY_FEATURE_SPARK_CONF = {
+    "pipelines.trigger.interval": FINAL_DAILY_FEATURE_TRIGGER_INTERVAL,
+}
 
 
 def _conf(key, default):
@@ -968,7 +975,8 @@ _FT_TAXI_IN_SPEC = dict(
 @dp.materialized_view(
     name=_fs_table("ft_airport_daily_taxi_out"),
     schema=daily_stats_schema_ddl(**_FT_TAXI_OUT_SPEC),
-    table_properties=DLT_TABLE_PROPERTIES,
+    table_properties=FINAL_DAILY_FEATURE_TABLE_PROPERTIES,
+    spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
 @dp.expect("non_negative_avg", "avg_taxi_out_7d IS NULL OR avg_taxi_out_7d >= 0")
@@ -981,7 +989,8 @@ def ft_airport_daily_taxi_out():
 @dp.materialized_view(
     name=_fs_table("ft_route_daily_stats"),
     schema=daily_stats_schema_ddl(**_FT_AIRBORNE_SPEC, extra_pk_col="route_id"),
-    table_properties=DLT_TABLE_PROPERTIES,
+    table_properties=FINAL_DAILY_FEATURE_TABLE_PROPERTIES,
+    spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
 @dp.expect("non_negative_avg", "avg_airborne_7d IS NULL OR avg_airborne_7d >= 0")
@@ -997,7 +1006,8 @@ def ft_route_daily_stats():
 @dp.materialized_view(
     name=_fs_table("ft_airport_daily_taxi_in"),
     schema=daily_stats_schema_ddl(**_FT_TAXI_IN_SPEC),
-    table_properties=DLT_TABLE_PROPERTIES,
+    table_properties=FINAL_DAILY_FEATURE_TABLE_PROPERTIES,
+    spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
 @dp.expect("non_negative_avg", "avg_taxi_in_7d IS NULL OR avg_taxi_in_7d >= 0")
@@ -1010,7 +1020,8 @@ def ft_airport_daily_taxi_in():
 @dp.materialized_view(
     name=_fs_table("ft_stand_daily_out"),
     schema=stand_daily_schema_ddl(is_taxi_out=True),
-    table_properties=DLT_TABLE_PROPERTIES,
+    table_properties=FINAL_DAILY_FEATURE_TABLE_PROPERTIES,
+    spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
 @dp.expect("non_negative_avg", "stand_avg_taxi_out_7d IS NULL OR stand_avg_taxi_out_7d >= 0")
@@ -1025,7 +1036,8 @@ def ft_stand_daily_out():
 @dp.materialized_view(
     name=_fs_table("ft_stand_daily_in"),
     schema=stand_daily_schema_ddl(is_taxi_out=False),
-    table_properties=DLT_TABLE_PROPERTIES,
+    table_properties=FINAL_DAILY_FEATURE_TABLE_PROPERTIES,
+    spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF,
 )
 @dp.expect("valid_event_date", "event_date >= '2023-01-01'")
 @dp.expect("non_negative_avg", "stand_avg_taxi_in_7d IS NULL OR stand_avg_taxi_in_7d >= 0")

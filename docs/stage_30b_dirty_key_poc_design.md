@@ -20,7 +20,8 @@ change production pipelines, feature logic, training, scoring, or table names.
 - 30B-3: compare candidate output against the current materialized view.
 - 30B-4: test whether `readStream` can detect dirty keys from the verified
   OCC_OPS / Netline source tables without stream aggregation or production
-  writes.
+  writes. 30B-4b uses the existing source CDF feed after plain source streaming
+  proved unsupported from notebooks.
 
 ## Why Dirty Keys, Not Streaming Aggregates
 
@@ -144,8 +145,10 @@ partial update strategy can be considered.
 30B-2 introduces no writes, MERGE, `foreachBatch`, production dirty-key tables,
 or pipeline changes. 30B-3 should run a controlled read-only parity check in
 Databricks and decide whether the entity-scoped approach is viable. 30B-4
-should test readStream dirty-key detection from source tables; any write
-strategy remains deferred.
+should test readStream dirty-key detection from source tables. 30B-4b uses the
+already-enabled source CDF feed for that diagnostic after plain notebook
+streaming failed against the OCC_OPS Lakeflow source objects; any write strategy
+remains deferred.
 
 ## 30B-3 Read-only Taxi-out Parity Notebook
 
@@ -201,13 +204,26 @@ Recommended project status after 30B-3:
 - 30B dirty-key POC through read-only parity: complete.
 - 30B/30C production write strategy: deferred.
 
-## 30B-4 readStream Dirty-key Detection POC
+## 30B-4b CDF readStream Dirty-key Detection POC
 
-30B-4 adds a minimal diagnostic notebook for the manager's intended
-architecture: use `readStream` only to detect dirty keys, then keep feature
-recompute as bounded batch work in later stages. The notebook does not change
-production feature logic, table definitions, pipeline config, checkpoints, or
-write strategy.
+30B-4 initially tried plain `spark.readStream.table(...)` against the OCC_OPS
+Lakeflow / Netline source objects from a notebook. That failed with an
+unsupported table operation because the source objects are Lakeflow streaming
+tables or Unity Catalog proxy objects that do not support plain notebook
+micro-batch or continuous scans.
+
+30B-4b switches the diagnostic to the working source CDF path. Runtime discovery
+showed that CDF is already enabled on the source tables, and both stream and
+batch CDF reads work from a notebook. The project does not modify source table
+properties or upstream pipelines; it only reads the existing change feed.
+
+This still mostly follows the manager's intended architecture:
+
+- stream only detects dirty keys and source metadata;
+- no aggregation is performed inside the stream;
+- recompute remains bounded batch work in later stages;
+- no production write path is introduced;
+- CDF is consumed as an existing upstream feed, not configured by this project.
 
 The POC tests these verified source tables:
 
@@ -225,6 +241,9 @@ Expected schema columns for `leg`:
 - `leg_state`
 - `leg_type`
 - `counter`
+- `_change_type`
+- `_commit_version`
+- `_commit_timestamp`
 
 Expected schema columns for `leg_times`:
 
@@ -234,51 +253,63 @@ Expected schema columns for `leg_times`:
 - `__END_AT`
 - `offblock_dt`
 - `airborne_dt`
+- `_change_type`
+- `_commit_version`
+- `_commit_timestamp`
 
 Acceptance criteria:
 
-- the stream can start against both source tables;
-- required schema columns are available;
+- CDF stream can start against both source tables with
+  `readChangeFeed = true`;
+- required schema and CDF metadata columns are available;
 - raw dirty candidate rows can be emitted to a memory sink;
+- serverless stream mode uses `availableNow`;
+- stream mode uses a temporary/debug UC Volume checkpoint;
 - no stream aggregation is used before the memory sink;
-- no CDF is used;
+- batch CDF mode can inspect explicit recent versions when needed;
+- no source table properties are changed;
 - no production writes are performed;
-- no production checkpoint is configured;
-- `leg_no`, `source_alias`, and `update_key` can be observed;
-- for `leg`, at least one `ARR` row during the sampling window is a strong
-  positive signal;
+- `leg_no`, `source_alias`, `update_key`, `_change_type`, and
+  `_commit_version` can be observed;
+- for `leg`, at least one `ARR` row and ideally one taxi-out production-filter
+  candidate during the sample is a strong positive signal;
 - for `leg_times`, at least one row with OOOI fields present is a strong
   positive signal;
-- if no rows appear in the short sampling window, classify the run as
-  inconclusive rather than failed.
+- if no rows appear in a bounded sample, classify the run as inconclusive rather
+  than failed.
 
 Manual run procedure:
 
-1. Run `notebooks/14_stage30b_readstream_dirty_key_poc.py` with
-   `RUN_STREAM = False` and review the printed config.
-2. Set `RUN_STREAM = True`.
-3. Run once manually for the configured `STREAM_DURATION_SECONDS`.
-4. Capture the final summary counts and interpretation.
+1. Run `notebooks/14_stage30b_readstream_dirty_key_poc.py` with both
+   `RUN_STREAM = False` and `RUN_BATCH_CDF = False`, then review the config.
+2. Set `CHECKPOINT_BASE_PATH` to a temporary/debug UC Volume path.
+3. Set `RUN_STREAM = True`; set `STARTING_VERSION` if the sample should begin
+   at a known recent version.
+4. Optionally set `RUN_BATCH_CDF = True` with explicit `STARTING_VERSION` /
+   `ENDING_VERSION` to inspect a bounded version range.
+5. Run once manually and capture the final summary counts and interpretation.
 
 Expected interpretation:
 
-- If streams start, required columns are present, rows are observed, and
-  `update_key` is visible, `readStream` is viable as a dirty-key detector input
-  for a later batch recompute design.
-- If streams start but no rows appear during the short window, the result is
-  inconclusive because no source activity may have occurred during sampling.
+- If CDF streams start, required columns are present, rows are observed, and
+  `update_key` / CDF metadata are visible, CDF readStream is viable as the
+  dirty-key detector input for a later batch recompute design.
+- If stream mode starts but no rows appear, use batch CDF over explicit versions
+  to distinguish no source activity from an issue in the stream sample.
 - If required columns are missing, the source shape must be revisited before
   this path can drive dirty-key detection.
 
 Limitations and risks:
 
-- `skipChangeCommits` semantics need explicit interpretation for correction
-  visibility.
-- Whether source updates appear as SCD2 append rows must be empirically
-  confirmed from observed rows.
-- The notebook uses only a temporary memory sink and no production checkpoint.
-- It does not implement partial recompute, production writes, dirty-key tables,
-  EMA recompute, or any 30C write strategy.
+- The design now depends on upstream CDF behavior staying available.
+- A durable checkpoint strategy is still required before any production design.
+- `_change_type` handling must be explicit, especially
+  `update_preimage` / `update_postimage` pairs.
+- ARR -> non-ARR transitions and entity/date moves need careful dirty-range
+  handling later.
+- EMA remains deferred.
+- The notebook still does not implement partial recompute, production writes,
+  dirty-key tables, or any 30C write strategy.
 
 ## Relationship To 30A
 

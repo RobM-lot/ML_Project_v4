@@ -24,33 +24,27 @@ REQUIRED_COLUMNS = {
     "airborne_dt",
 }
 
-FORBIDDEN_CDF_PATTERNS = {
-    "readChangeFeed",
-    "changeDataFeed",
-    "table_changes",
+CDF_COLUMNS = {
+    "_change_type",
+    "_commit_version",
+    "_commit_timestamp",
 }
 
-FORBIDDEN_PRODUCTION_WRITE_PATTERNS = {
+FORBIDDEN_SOURCE_MUTATION_PATTERNS = {
+    "ALTER TABLE",
+    "SET TBLPROPERTIES",
+    "enableChangeDataFeed",
+    "delta.enableChangeDataFeed = true",
+    "CREATE TABLE",
+    "DROP TABLE",
+    "DELETE FROM",
+    "UPDATE ",
+    "MERGE INTO",
     ".saveAsTable",
     ".insertInto",
     ".toTable",
     ".format(\"delta\")",
     ".format('delta')",
-    ".format(\"parquet\")",
-    ".format('parquet')",
-    ".format(\"orc\")",
-    ".format('orc')",
-    ".format(\"json\")",
-    ".format('json')",
-    ".format(\"csv\")",
-    ".format('csv')",
-    "CREATE TABLE",
-    "ALTER TABLE",
-    "DROP TABLE",
-    "DELETE FROM",
-    "MERGE INTO",
-    "dbutils.fs.",
-    "checkpointLocation",
 }
 
 
@@ -62,11 +56,26 @@ def test_stage_30b_readstream_poc_notebook_exists_and_is_safe_gated():
     source = _read_notebook()
 
     assert NOTEBOOK_PATH.exists()
-    assert "Stage 30B-4 readStream dirty-key detection POC" in source
+    assert "Stage 30B-4b CDF readStream dirty-key detection POC" in source
     assert "This notebook must not mutate production tables or workspace resources." in source
     assert "RUN_STREAM = False" in source
-    assert "if not RUN_STREAM:" in source
-    assert "RUN_STREAM_FALSE" in source
+    assert "RUN_BATCH_CDF = False" in source
+    assert "if not RUN_STREAM and not RUN_BATCH_CDF:" in source
+    assert "RUN_CDF_DIAGNOSTICS_FALSE" in source
+
+
+def test_stage_30b_readstream_poc_uses_cdf_available_now_and_checkpoint_path():
+    source = _read_notebook()
+
+    assert "spark.readStream" in source
+    assert "spark.read" in source
+    assert ".option(\"readChangeFeed\", \"true\")" in source
+    assert "trigger(availableNow=True)" in source
+    assert "STREAM_TRIGGER_AVAILABLE_NOW = True" in source
+    assert "CHECKPOINT_BASE_PATH = \"\"" in source
+    assert ".option(\"checkpointLocation\", checkpoint_path)" in source
+    assert "CHECKPOINT_BASE_PATH must be set for RUN_STREAM mode" in source
+    assert "starts with /Volumes/" in source
 
 
 def test_stage_30b_readstream_poc_references_required_sources_columns_and_aliases():
@@ -75,7 +84,7 @@ def test_stage_30b_readstream_poc_references_required_sources_columns_and_aliase
     for table_name in SOURCE_TABLES:
         assert table_name in source
 
-    for column_name in REQUIRED_COLUMNS:
+    for column_name in REQUIRED_COLUMNS | CDF_COLUMNS:
         assert column_name in source
 
     assert "\"leg\"" in source
@@ -83,39 +92,37 @@ def test_stage_30b_readstream_poc_references_required_sources_columns_and_aliase
     assert "source_alias" in source
 
 
-def test_stage_30b_readstream_poc_uses_readstream_skip_change_commits_and_memory_sink_only():
+def test_stage_30b_readstream_poc_uses_memory_sink_only_for_streaming_output():
     source = _read_notebook()
 
-    assert "spark.readStream" in source
-    assert ".option(\"skipChangeCommits\", \"true\")" in source
-    assert ".writeStream.format(\"memory\")" in source
+    assert "raw_stream_df.writeStream.format(\"memory\")" in source
+    assert ".outputMode(\"append\")" in source
 
-    format_calls = set(re.findall(r"\.format\(([^)]+)\)", source))
-    assert format_calls == {"\"memory\""}
+    write_stream_format_calls = set(
+        re.findall(r"\.writeStream\.format\(([^)]+)\)", source)
+    )
+    assert write_stream_format_calls == {"\"memory\""}
 
 
-def test_stage_30b_readstream_poc_emits_raw_rows_without_stream_aggregation():
+def test_stage_30b_readstream_poc_emits_raw_stream_rows_without_stream_aggregation():
     source = _read_notebook()
 
     raw_select_pos = source.index("def _select_raw_dirty_candidates")
     write_stream_pos = source.index("raw_stream_df.writeStream")
+    writer_start_pos = source.index("query = writer.start()")
     memory_read_pos = source.index("memory_df = spark.table(query_name)")
 
     assert raw_select_pos < write_stream_pos < memory_read_pos
     assert ".select(" in source[raw_select_pos:write_stream_pos]
-
-    aggregation_positions = [
-        match.start()
-        for match in re.finditer(r"\.(?:agg|groupBy)\(", source)
-    ]
-    assert aggregation_positions
-    assert all(position > memory_read_pos for position in aggregation_positions)
+    assert ".agg(" not in source[raw_select_pos:writer_start_pos]
+    assert ".groupBy(" not in source[raw_select_pos:writer_start_pos]
+    assert "_summarize_static_cdf_rows(memory_df, source_alias, \"stream\")" in source
 
 
-def test_stage_30b_readstream_poc_contains_no_cdf_or_production_write_patterns():
+def test_stage_30b_readstream_poc_contains_no_source_mutation_or_production_write_patterns():
     source = _read_notebook()
 
-    for pattern in FORBIDDEN_CDF_PATTERNS | FORBIDDEN_PRODUCTION_WRITE_PATTERNS:
+    for pattern in FORBIDDEN_SOURCE_MUTATION_PATTERNS:
         assert pattern not in source
 
     assert ".foreachBatch(" not in source

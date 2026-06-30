@@ -33,6 +33,8 @@ targets:
   dev:
     mode: development
     default: true
+    presets:
+      pipelines_development: false
     variables:
       runtime_env: "dev"
       source_catalog: "panda_silver_prod"
@@ -49,6 +51,11 @@ targets:
         level: CAN_MANAGE
       - user_name: 30002818@lot.pl
         level: CAN_MANAGE
+    resources:
+      pipelines:
+        pipeline_ml_feature_store:
+          development: false
+          continuous: true
 
   prod:
     mode: production

@@ -5,8 +5,11 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DATABRICKS_PATH = REPO_ROOT / "databricks.yml"
 PIPELINE_PATH = REPO_ROOT / "resources" / "pipeline.yml"
 FEATURE_STORE_PATH = REPO_ROOT / "src" / "pipeline" / "feature_store.py"
 TRAINING_PATH = REPO_ROOT / "src" / "ml_project" / "training.py"
@@ -49,6 +52,10 @@ FINAL_FT_SETTINGS = {
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _load_yaml(path: Path) -> dict:
+    return yaml.safe_load(_read(path))
 
 
 def _pipeline_resource_block() -> list[str]:
@@ -126,15 +133,39 @@ def _decorated_dlt_tables() -> dict[str, dict[str, str | None]]:
     return tables
 
 
-def test_pipeline_feature_store_resource_is_continuous_without_global_interval():
+def test_pipeline_feature_store_resource_is_continuous_without_development_mode():
     block = _pipeline_resource_block()
     pipeline_text = "\n".join(block)
+    pipeline = _load_yaml(PIPELINE_PATH)["resources"]["pipelines"]["pipeline_ml_feature_store"]
 
-    assert "      development: true" in block
-    assert "      continuous: true" in block
+    assert pipeline["continuous"] is True
+    assert pipeline.get("development") is not True
     assert "      serverless: true" in block
     assert "      channel: PREVIEW" in block
     assert "pipelines.trigger.interval" not in pipeline_text
+
+
+def test_dev_target_overrides_pipeline_to_continuous_non_development_mode():
+    config = _load_yaml(DATABRICKS_PATH)
+    dev = config["targets"]["dev"]
+    pipeline = dev["resources"]["pipelines"]["pipeline_ml_feature_store"]
+
+    assert dev["mode"] == "development"
+    assert dev["presets"]["pipelines_development"] is False
+    assert pipeline["development"] is False
+    assert pipeline["continuous"] is True
+
+
+def test_dev_target_keeps_dev_catalog_schema_variables():
+    dev_variables = _load_yaml(DATABRICKS_PATH)["targets"]["dev"]["variables"]
+
+    assert dev_variables["runtime_env"] == "dev"
+    assert dev_variables["source_catalog"] == "panda_silver_prod"
+    assert dev_variables["source_schema"] == "occ_ops"
+    assert dev_variables["silver_catalog"] == "panda_silver_dev"
+    assert dev_variables["silver_schema"] == "ml_ops"
+    assert dev_variables["gold_catalog"] == "panda_gold_dev"
+    assert dev_variables["gold_schema"] == "ml_ops"
 
 
 def test_final_daily_feature_trigger_interval_config_is_defined():
@@ -219,6 +250,9 @@ def test_feature_store_has_no_stage_30b_or_cdf_logic():
         "dirty_key",
         "dirty-key",
         "dirty key",
+        "watermark",
+        "partial_recompute",
+        "partial recompute",
     ):
         assert forbidden not in source
 

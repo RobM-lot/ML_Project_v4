@@ -2,7 +2,6 @@ resources:
   pipelines:
     pipeline_ml_feature_store:
       name: "ML_Project_v4_ml_feature_store"
-      development: true
       continuous: true
       root_path: ${workspace.root_path}
       libraries:

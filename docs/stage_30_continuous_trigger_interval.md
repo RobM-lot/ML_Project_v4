@@ -69,6 +69,41 @@ The semantic output of the feature tables should remain unchanged. Row contents,
 feature formulas, table names, and training/scoring consumers should stay the
 same.
 
+## Deployment-mode fix after first Databricks validation
+
+The first manual Databricks validation showed that the pipeline still deployed
+as `Triggered`. The Databricks UI/API showed `"continuous": null` and
+`"development": true`, even though local `resources/pipeline.yml` had
+`continuous: true`.
+
+The likely cause is bundle `mode: development` applying Lakeflow pipeline
+development mode during deployment. For Stage 30A continuous validation, the dev
+target now keeps the dev catalog/schema variables but explicitly deploys
+`pipeline_ml_feature_store` with:
+
+- `presets.pipelines_development: false`
+- `development: false`
+- `continuous: true`
+
+The dev target still uses `panda_silver_dev.ml_ops` and `panda_gold_dev.ml_ops`,
+with source data from `panda_silver_prod.occ_ops`.
+
+The per-flow `pipelines.trigger.interval` setting only becomes meaningful once
+the deployed pipeline is actually continuous.
+
+After manual deploy, verify:
+
+- UI Pipeline mode is `Continuous`.
+- Pipeline JSON has `"continuous": true`.
+- Pipeline JSON has `"development": false`.
+- The run does not simply finish as a one-off `Refresh all`.
+- The event log shows automatic refresh near the expected interval.
+- Final materialized view flows may still show `COMPLETE_RECOMPUTE`, which
+  remains expected for 30A.
+
+This deployment-mode fix is still a local configuration patch until manually
+deployed and validated in Databricks.
+
 ## Risks
 
 - Hourly complete recompute can increase compute cost.

@@ -117,6 +117,8 @@ def _decorated_dlt_tables() -> dict[str, dict[str, str | None]]:
                 spark_conf_name = spark_conf_kw.value.id
 
             tables[table_name] = {
+                "decorator": decorator.func.attr,
+                "function": node.name,
                 "table_properties": props_kw.value.id,
                 "spark_conf": spark_conf_name,
             }
@@ -184,6 +186,26 @@ def test_only_final_daily_feature_mvs_use_interval_properties():
     for table_name in NON_FINAL_TABLES:
         assert tables[table_name]["table_properties"] == "DLT_TABLE_PROPERTIES"
         assert tables[table_name]["spark_conf"] is None
+
+
+def test_final_daily_feature_objects_remain_materialized_views():
+    tables = _decorated_dlt_tables()
+
+    for table_name in FINAL_DAILY_TABLES:
+        assert tables[table_name]["decorator"] == "materialized_view"
+        assert tables[table_name]["function"] == table_name
+
+
+def test_exactly_final_daily_feature_mvs_use_trigger_spark_conf():
+    tables = _decorated_dlt_tables()
+    trigger_conf_functions = {
+        metadata["function"]
+        for metadata in tables.values()
+        if metadata["spark_conf"] == "FINAL_DAILY_FEATURE_SPARK_CONF"
+    }
+
+    assert len(trigger_conf_functions) == 5
+    assert trigger_conf_functions == FINAL_DAILY_TABLES
 
 
 def test_feature_store_has_no_stage_30b_or_cdf_logic():

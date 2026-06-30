@@ -163,6 +163,14 @@ The notebook validates a small sample of recent dirty `update_key` batches. It:
 - compares candidate rows to current MV rows using only non-EMA comparable
   columns.
 
+To avoid inconclusive samples from events newer than the current MV horizon, the
+notebook defaults to `REQUIRE_FULL_AFFECTED_WINDOW = True`. It derives
+`MAX_CURRENT_MV_EVENT_DATE = max(current_mv.event_date)` and keeps only dirty
+taxi-out events where `dirty_event_date + 30 days <= MAX_CURRENT_MV_EVENT_DATE`.
+If no such events remain, the notebook stops without failure and asks the user
+to increase `LATEST_UPDATE_KEY_BATCHES` or provide an older
+`LAST_SEEN_UPDATE_KEY`.
+
 Filtering the current MV to affected pairs before comparison is critical. The
 POC should not compare a small candidate sample against the entire current MV,
 because that would create artificial `missing_in_candidate` rows.

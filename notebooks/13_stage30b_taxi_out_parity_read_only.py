@@ -32,6 +32,7 @@ MAX_DIRTY_LEGS = 25
 MAX_AFFECTED_ENTITIES = 1
 ENTITY_FILTER = ""
 LAST_SEEN_UPDATE_KEY = None
+REQUIRE_FULL_AFFECTED_WINDOW = True
 TOLERANCE = 1e-9
 
 
@@ -56,6 +57,7 @@ CONFIG_ROWS = [
     ("MAX_AFFECTED_ENTITIES", str(MAX_AFFECTED_ENTITIES)),
     ("ENTITY_FILTER", ENTITY_FILTER or "<none>"),
     ("LAST_SEEN_UPDATE_KEY", str(LAST_SEEN_UPDATE_KEY)),
+    ("REQUIRE_FULL_AFFECTED_WINDOW", str(REQUIRE_FULL_AFFECTED_WINDOW)),
 ]
 
 display(spark.createDataFrame(CONFIG_ROWS, ["parameter", "value"]))
@@ -131,6 +133,18 @@ leg_times_src = spark.table(source_table(SOURCE_LEG_TIMES_TABLE))
 cleaned = spark.table(silver_table(CLEANED_TABLE))
 current_mv = spark.table(silver_table(CURRENT_MV_TABLE))
 
+max_current_mv_event_date_row = current_mv.agg(F.max(DATE_COL).alias("max_current_mv_event_date")).first()
+MAX_CURRENT_MV_EVENT_DATE = max_current_mv_event_date_row["max_current_mv_event_date"]
+
+print(f"MAX_CURRENT_MV_EVENT_DATE: {MAX_CURRENT_MV_EVENT_DATE}")
+print(
+    "Full affected-window eligibility condition: "
+    "date_add(dirty_event_date, 30) <= MAX_CURRENT_MV_EVENT_DATE"
+)
+if MAX_CURRENT_MV_EVENT_DATE is None:
+    print("Current MV has no max event_date. Parity sample is inconclusive; stop without failure.")
+    dbutils.notebook.exit("NO_CURRENT_MV_EVENT_DATE")
+
 
 def latest_update_key_threshold(source_dfs, batches: int):
     if LAST_SEEN_UPDATE_KEY is not None:
@@ -181,6 +195,18 @@ dirty_events = map_dirty_legs_to_taxi_out_events(
     data_cutoff_date=DATA_CUTOFF_DATE,
 )
 
+if REQUIRE_FULL_AFFECTED_WINDOW:
+    dirty_events = dirty_events.where(
+        F.date_add(F.col("dirty_event_date"), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)
+    )
+    eligible_count = dirty_events.count()
+    print(f"dirty taxi-out events eligible for full affected-window comparison: {eligible_count}")
+    if eligible_count == 0:
+        print("No eligible dirty taxi-out events remain after full affected-window filtering.")
+        print("The latest update_key sample maps only to too-recent events.")
+        print("Increase LATEST_UPDATE_KEY_BATCHES or provide an older LAST_SEEN_UPDATE_KEY.")
+        dbutils.notebook.exit("NO_FULL_WINDOW_ELIGIBLE_DIRTY_EVENTS")
+
 if ENTITY_FILTER:
     dirty_events = dirty_events.where(F.col(ENTITY_COL) == F.lit(ENTITY_FILTER))
 
@@ -189,6 +215,9 @@ dirty_events = dirty_events.join(selected_entities, on=ENTITY_COL, how="inner")
 
 dirty_event_count = dirty_events.count()
 print(f"dirty taxi-out events after entity cap: {dirty_event_count}")
+if dirty_event_count == 0:
+    print("No dirty taxi-out events remain after optional entity filter and entity cap.")
+    dbutils.notebook.exit("NO_DIRTY_EVENTS_AFTER_ENTITY_FILTER")
 display(dirty_events.orderBy(ENTITY_COL, "dirty_event_date", "leg_no"))
 
 # COMMAND ----------

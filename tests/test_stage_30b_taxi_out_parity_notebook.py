@@ -25,6 +25,7 @@ SAMPLING_CONTROLS = {
     "MAX_DIRTY_LEGS",
     "MAX_AFFECTED_ENTITIES",
     "LAST_SEEN_UPDATE_KEY",
+    "REQUIRE_FULL_AFFECTED_WINDOW",
 }
 
 FORBIDDEN_PATTERNS = {
@@ -81,6 +82,17 @@ def test_stage_30b_parity_notebook_has_sampling_controls():
 
     assert "ENTITY_FILTER" in source
     assert "MAX_AFFECTED_ENTITIES" in source
+    assert "REQUIRE_FULL_AFFECTED_WINDOW = True" in source
+
+
+def test_stage_30b_parity_notebook_requires_full_affected_window_by_default():
+    source = _read_notebook()
+
+    assert "MAX_CURRENT_MV_EVENT_DATE" in source
+    assert "current_mv.agg(F.max(DATE_COL).alias(\"max_current_mv_event_date\")).first()" in source
+    assert "date_add(dirty_event_date, 30) <= MAX_CURRENT_MV_EVENT_DATE" in source
+    assert "F.date_add(F.col(\"dirty_event_date\"), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)" in source
+    assert "NO_FULL_WINDOW_ELIGIBLE_DIRTY_EVENTS" in source
 
 
 def test_stage_30b_parity_notebook_filters_current_mv_to_affected_pairs_before_comparison():

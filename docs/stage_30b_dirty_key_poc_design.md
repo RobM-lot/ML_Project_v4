@@ -18,8 +18,9 @@ change production pipelines, feature logic, training, scoring, or table names.
 - 30B-1: implement a candidate dirty-key detector after the source is confirmed.
 - 30B-2: build a batch recompute candidate for `ft_airport_daily_taxi_out`.
 - 30B-3: compare candidate output against the current materialized view.
-- 30B-4: decide write strategy, possibly `foreachBatch` or another controlled
-  partial-update pattern.
+- 30B-4: test whether `readStream` can detect dirty keys from the verified
+  OCC_OPS / Netline source tables without stream aggregation or production
+  writes.
 
 ## Why Dirty Keys, Not Streaming Aggregates
 
@@ -142,8 +143,9 @@ partial update strategy can be considered.
 
 30B-2 introduces no writes, MERGE, `foreachBatch`, production dirty-key tables,
 or pipeline changes. 30B-3 should run a controlled read-only parity check in
-Databricks and decide whether the entity-scoped approach is viable. 30B-4 and
-any write strategy remain deferred.
+Databricks and decide whether the entity-scoped approach is viable. 30B-4
+should test readStream dirty-key detection from source tables; any write
+strategy remains deferred.
 
 ## 30B-3 Read-only Taxi-out Parity Notebook
 
@@ -198,6 +200,85 @@ Recommended project status after 30B-3:
 - 30A runtime continuous refresh: complete.
 - 30B dirty-key POC through read-only parity: complete.
 - 30B/30C production write strategy: deferred.
+
+## 30B-4 readStream Dirty-key Detection POC
+
+30B-4 adds a minimal diagnostic notebook for the manager's intended
+architecture: use `readStream` only to detect dirty keys, then keep feature
+recompute as bounded batch work in later stages. The notebook does not change
+production feature logic, table definitions, pipeline config, checkpoints, or
+write strategy.
+
+The POC tests these verified source tables:
+
+- `panda_silver_prod.occ_ops.netline___schedops__leg`
+- `panda_silver_prod.occ_ops.netline___schedops__leg_times`
+
+Expected schema columns for `leg`:
+
+- `leg_no`
+- `update_key`
+- `__START_AT`
+- `__END_AT`
+- `dep_ap_sched`
+- `dep_sched_dt`
+- `leg_state`
+- `leg_type`
+- `counter`
+
+Expected schema columns for `leg_times`:
+
+- `leg_no`
+- `update_key`
+- `__START_AT`
+- `__END_AT`
+- `offblock_dt`
+- `airborne_dt`
+
+Acceptance criteria:
+
+- the stream can start against both source tables;
+- required schema columns are available;
+- raw dirty candidate rows can be emitted to a memory sink;
+- no stream aggregation is used before the memory sink;
+- no CDF is used;
+- no production writes are performed;
+- no production checkpoint is configured;
+- `leg_no`, `source_alias`, and `update_key` can be observed;
+- for `leg`, at least one `ARR` row during the sampling window is a strong
+  positive signal;
+- for `leg_times`, at least one row with OOOI fields present is a strong
+  positive signal;
+- if no rows appear in the short sampling window, classify the run as
+  inconclusive rather than failed.
+
+Manual run procedure:
+
+1. Run `notebooks/14_stage30b_readstream_dirty_key_poc.py` with
+   `RUN_STREAM = False` and review the printed config.
+2. Set `RUN_STREAM = True`.
+3. Run once manually for the configured `STREAM_DURATION_SECONDS`.
+4. Capture the final summary counts and interpretation.
+
+Expected interpretation:
+
+- If streams start, required columns are present, rows are observed, and
+  `update_key` is visible, `readStream` is viable as a dirty-key detector input
+  for a later batch recompute design.
+- If streams start but no rows appear during the short window, the result is
+  inconclusive because no source activity may have occurred during sampling.
+- If required columns are missing, the source shape must be revisited before
+  this path can drive dirty-key detection.
+
+Limitations and risks:
+
+- `skipChangeCommits` semantics need explicit interpretation for correction
+  visibility.
+- Whether source updates appear as SCD2 append rows must be empirically
+  confirmed from observed rows.
+- The notebook uses only a temporary memory sink and no production checkpoint.
+- It does not implement partial recompute, production writes, dirty-key tables,
+  EMA recompute, or any 30C write strategy.
 
 ## Relationship To 30A
 

@@ -64,6 +64,129 @@ read-only diagnostic notebook should confirm whether source tables expose
 usable version or update columns, and whether the current `ft_leg_*` tables
 represent recent source changes well enough for dirty-key detection.
 
+## 30B-1 Verified Decisions
+
+Runtime diagnostics confirmed that `ft_leg_*` tables are not primary dirty-key
+sources for the first POC. Dirty-key candidates should come from source
+`netline___schedops__*` tables.
+
+The first POC target remains `ft_airport_daily_taxi_out`.
+
+The taxi-out POC uses:
+
+- `netline___schedops__leg`
+- `netline___schedops__leg_times`
+
+`netline___schedops__leg_misc` is deferred for stand feature POCs.
+
+The primary dirty-key strategy is `UPDATE_KEY`:
+
+- `update_key == __START_AT` in the verified source tables.
+- `update_key` is monotonic and suitable for checkpointing.
+- `update_key` is batch-level, not row-level. One value can cover many rows.
+- Conceptual checkpoint logic is: changed source rows are those where
+  `update_key > last_seen_update_key`.
+- After filtering, dirty rows must be deduplicated to unique dirty `leg_no` /
+  entity / event_date candidates.
+
+Latest/current source row logic is:
+
+- first filter `__END_AT IS NULL`;
+- then select latest by `update_key DESC` if multiple rows per key remain.
+
+For taxi-out:
+
+- `event_date = to_date(dep_sched_dt)`;
+- entity key is `dep_ap_sched`;
+- current-day source data is excluded from production rolling windows;
+- affected output dates are `D+1 ... D+30` for a dirty event date `D`.
+
+EMA remains deferred. 30B-1 does not implement EMA partial recompute because EMA
+can propagate beyond `D+30`.
+
+No production write or partial recompute strategy is implemented in 30B-1.
+30B-2 should build a candidate batch recompute output for
+`ft_airport_daily_taxi_out` and compare it with the current MV.
+
+## 30B-2 Candidate Non-EMA Parity Helpers
+
+30B-2 adds local candidate recompute and parity helpers for the first POC target,
+`ft_airport_daily_taxi_out`. These helpers use `cleaned_flight_data_full_table`-
+shaped input because that is the production source of the current final MV.
+
+The candidate recompute is intentionally entity-scoped for parity safety. It
+identifies affected `dep_ap_sched` entities and affected output dates, recomputes
+non-EMA taxi-out features for those entities using available cleaned-flight
+history, then filters output to the affected entity/date pairs. This is heavier
+than the eventual optimized partial strategy, but it avoids prematurely choosing
+a minimal bounded input window before parity is proven.
+
+Affected outputs still follow the dirty event date rule:
+
+- dirty source event date `D`;
+- affected output dates `D+1 ... D+30`;
+- output date `D` is excluded because current rolling windows exclude same-day
+  source data.
+
+The comparable 30B-2 feature set is non-EMA only:
+
+- rolling avg/std/p90/min/max;
+- rolling counts;
+- trend columns;
+- `has_hist` flags;
+- `days_since_last_event`.
+
+EMA columns and `delta_ema_avg_*` columns are explicitly excluded and deferred.
+EMA can propagate beyond `D+30`, so it needs a separate design before any
+partial update strategy can be considered.
+
+30B-2 introduces no writes, MERGE, `foreachBatch`, production dirty-key tables,
+or pipeline changes. 30B-3 should run a controlled read-only parity check in
+Databricks and decide whether the entity-scoped approach is viable. 30B-4 and
+any write strategy remain deferred.
+
+## 30B-3 Read-only Taxi-out Parity Notebook
+
+30B-3 adds exactly one controlled read-only parity notebook for
+`ft_airport_daily_taxi_out`. The notebook is manually run only; it is not
+deployed as a job, pipeline, or production workflow.
+
+The notebook validates a small sample of recent dirty `update_key` batches. It:
+
+- extracts dirty leg candidates from the source `leg` and `leg_times` tables;
+- maps dirty legs to taxi-out dirty events;
+- expands dirty event date `D` to affected output dates `D+1 ... D+30`;
+- builds entity-scoped non-EMA candidate rows from
+  `cleaned_flight_data_full_table`-shaped input;
+- filters the current `ft_airport_daily_taxi_out` MV to the exact affected
+  `dep_ap_sched` / `event_date` pairs;
+- compares candidate rows to current MV rows using only non-EMA comparable
+  columns.
+
+Filtering the current MV to affected pairs before comparison is critical. The
+POC should not compare a small candidate sample against the entire current MV,
+because that would create artificial `missing_in_candidate` rows.
+
+30B-3 introduces no writes, MERGE, `foreachBatch`, production tables, or
+pipeline changes. EMA and `delta_ema_avg_*` columns remain excluded and
+deferred.
+
+Possible outcomes:
+
+- Parity is clean enough: the 30B dirty-key POC is technically viable, but write
+  strategy remains deferred.
+- Parity mismatches appear: inspect whether differences come from the candidate
+  helper, production feature math, data filtering, null behavior, tolerance, or
+  EMA-excluded columns.
+- Performance is too heavy: partial strategy needs further design before any
+  production path.
+
+Recommended project status after 30B-3:
+
+- 30A runtime continuous refresh: complete.
+- 30B dirty-key POC through read-only parity: complete.
+- 30B/30C production write strategy: deferred.
+
 ## Relationship To 30A
 
 30A made the current feature-store pipeline able to run continuously and gave

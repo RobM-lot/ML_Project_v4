@@ -90,9 +90,39 @@ def test_stage_30b_parity_notebook_requires_full_affected_window_by_default():
 
     assert "MAX_CURRENT_MV_EVENT_DATE" in source
     assert "current_mv.agg(F.max(DATE_COL).alias(\"max_current_mv_event_date\")).first()" in source
-    assert "date_add(dirty_event_date, 30) <= MAX_CURRENT_MV_EVENT_DATE" in source
-    assert "F.date_add(F.col(\"dirty_event_date\"), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)" in source
+    assert "date_add(to_date(dep_sched_dt), 30) <= MAX_CURRENT_MV_EVENT_DATE" in source
+    assert "F.date_add(F.to_date(F.col(\"dep_sched_dt\")), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)" in source
     assert "NO_FULL_WINDOW_ELIGIBLE_DIRTY_EVENTS" in source
+    assert "selected lower bound/entity/window" in source
+
+
+def test_stage_30b_parity_notebook_maps_and_filters_before_dirty_leg_cap():
+    source = _read_notebook()
+
+    dirty_legs_pos = source.index("dirty_legs = dirty_leg.unionByName")
+    map_pos = source.index("mapped_dirty_events = map_dirty_legs_to_taxi_out_events")
+    entity_filter_pos = source.index("if ENTITY_FILTER:")
+    full_window_pos = source.index("if REQUIRE_FULL_AFFECTED_WINDOW:")
+    final_cap_pos = source.index("dirty_events_limited = dirty_events_with_updates.orderBy")
+
+    assert dirty_legs_pos < map_pos < entity_filter_pos < full_window_pos < final_cap_pos
+    assert "dirty_legs_limited = dirty_legs.orderBy" not in source
+    assert "dirty_legs_limited" not in source
+
+
+def test_stage_30b_parity_notebook_reports_eligibility_first_sampling_counts():
+    source = _read_notebook()
+
+    expected_count_messages = {
+        "dirty leg/source candidates before eligibility",
+        "mapped dirty taxi-out events before eligibility",
+        "mapped dirty taxi-out events after ENTITY_FILTER",
+        "mapped dirty taxi-out events after full-window eligibility",
+        "mapped dirty taxi-out events after cap",
+    }
+
+    for message in expected_count_messages:
+        assert message in source
 
 
 def test_stage_30b_parity_notebook_filters_current_mv_to_affected_pairs_before_comparison():

@@ -165,11 +165,15 @@ The notebook validates a small sample of recent dirty `update_key` batches. It:
 
 To avoid inconclusive samples from events newer than the current MV horizon, the
 notebook defaults to `REQUIRE_FULL_AFFECTED_WINDOW = True`. It derives
-`MAX_CURRENT_MV_EVENT_DATE = max(current_mv.event_date)` and keeps only dirty
-taxi-out events where `dirty_event_date + 30 days <= MAX_CURRENT_MV_EVENT_DATE`.
-If no such events remain, the notebook stops without failure and asks the user
-to increase `LATEST_UPDATE_KEY_BATCHES` or provide an older
-`LAST_SEEN_UPDATE_KEY`.
+`MAX_CURRENT_MV_EVENT_DATE = max(current_mv.event_date)` and applies
+eligibility-first sampling before the dirty-leg cap. The notebook maps dirty
+legs to taxi-out events, applies the optional entity filter and the full-window
+condition `date_add(to_date(dep_sched_dt), 30) <= MAX_CURRENT_MV_EVENT_DATE`,
+and only then applies `MAX_DIRTY_LEGS` / `MAX_AFFECTED_ENTITIES`. This avoids
+selecting only the newest rows above a manual lower-bound `LAST_SEEN_UPDATE_KEY`
+when those rows are too recent for a complete `D+1 ... D+30` comparison. If no
+eligible events remain, the notebook stops without failure and reports that no
+eligible events exist for the selected lower bound, entity, and window.
 
 Filtering the current MV to affected pairs before comparison is critical. The
 POC should not compare a small candidate sample against the entire current MV,

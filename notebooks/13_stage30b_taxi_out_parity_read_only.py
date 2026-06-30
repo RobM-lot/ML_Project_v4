@@ -139,7 +139,7 @@ MAX_CURRENT_MV_EVENT_DATE = max_current_mv_event_date_row["max_current_mv_event_
 print(f"MAX_CURRENT_MV_EVENT_DATE: {MAX_CURRENT_MV_EVENT_DATE}")
 print(
     "Full affected-window eligibility condition: "
-    "date_add(dirty_event_date, 30) <= MAX_CURRENT_MV_EVENT_DATE"
+    "date_add(to_date(dep_sched_dt), 30) <= MAX_CURRENT_MV_EVENT_DATE"
 )
 if MAX_CURRENT_MV_EVENT_DATE is None:
     print("Current MV has no max event_date. Parity sample is inconclusive; stop without failure.")
@@ -179,45 +179,75 @@ dirty_leg = extract_dirty_leg_keys(leg_src, last_seen_update_key, "leg")
 dirty_leg_times = extract_dirty_leg_keys(leg_times_src, last_seen_update_key, "leg_times")
 
 dirty_legs = dirty_leg.unionByName(dirty_leg_times).dropDuplicates(["leg_no", "dirty_source_alias"])
-dirty_legs_limited = dirty_legs.orderBy(F.desc("max_update_key"), "leg_no", "dirty_source_alias").limit(MAX_DIRTY_LEGS)
 
-dirty_leg_count = dirty_legs_limited.count()
-print(f"dirty leg/source candidates after cap: {dirty_leg_count}")
-display(dirty_legs_limited)
+dirty_leg_source_count = dirty_legs.count()
+print(f"dirty leg/source candidates before eligibility: {dirty_leg_source_count}")
 
 # COMMAND ----------
 
 current_leg = select_current_latest(leg_src, partition_cols=("leg_no",))
-dirty_events = map_dirty_legs_to_taxi_out_events(
-    dirty_legs_limited,
+
+mapped_dirty_events = map_dirty_legs_to_taxi_out_events(
+    dirty_legs,
     current_leg,
     history_start=HISTORY_START,
     data_cutoff_date=DATA_CUTOFF_DATE,
 )
+mapped_before_eligibility_count = mapped_dirty_events.count()
+print(f"mapped dirty taxi-out events before eligibility: {mapped_before_eligibility_count}")
+
+current_leg_for_mapping = current_leg
+if ENTITY_FILTER:
+    current_leg_for_mapping = current_leg_for_mapping.where(F.col(ENTITY_COL) == F.lit(ENTITY_FILTER))
+
+entity_filtered_dirty_events = map_dirty_legs_to_taxi_out_events(
+    dirty_legs,
+    current_leg_for_mapping,
+    history_start=HISTORY_START,
+    data_cutoff_date=DATA_CUTOFF_DATE,
+)
+entity_filtered_count = entity_filtered_dirty_events.count()
+print(f"mapped dirty taxi-out events after ENTITY_FILTER: {entity_filtered_count}")
 
 if REQUIRE_FULL_AFFECTED_WINDOW:
-    dirty_events = dirty_events.where(
-        F.date_add(F.col("dirty_event_date"), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)
+    current_leg_for_mapping = current_leg_for_mapping.where(
+        F.date_add(F.to_date(F.col("dep_sched_dt")), 30) <= F.lit(MAX_CURRENT_MV_EVENT_DATE)
     )
-    eligible_count = dirty_events.count()
-    print(f"dirty taxi-out events eligible for full affected-window comparison: {eligible_count}")
-    if eligible_count == 0:
-        print("No eligible dirty taxi-out events remain after full affected-window filtering.")
-        print("The latest update_key sample maps only to too-recent events.")
-        print("Increase LATEST_UPDATE_KEY_BATCHES or provide an older LAST_SEEN_UPDATE_KEY.")
-        dbutils.notebook.exit("NO_FULL_WINDOW_ELIGIBLE_DIRTY_EVENTS")
 
-if ENTITY_FILTER:
-    dirty_events = dirty_events.where(F.col(ENTITY_COL) == F.lit(ENTITY_FILTER))
+dirty_events = map_dirty_legs_to_taxi_out_events(
+    dirty_legs,
+    current_leg_for_mapping,
+    history_start=HISTORY_START,
+    data_cutoff_date=DATA_CUTOFF_DATE,
+)
+full_window_eligible_count = dirty_events.count()
+print(f"mapped dirty taxi-out events after full-window eligibility: {full_window_eligible_count}")
+if REQUIRE_FULL_AFFECTED_WINDOW and full_window_eligible_count == 0:
+    print("No eligible dirty taxi-out events exist for the selected lower bound/entity/window.")
+    print("Try lowering LAST_SEEN_UPDATE_KEY, changing ENTITY_FILTER, or disabling REQUIRE_FULL_AFFECTED_WINDOW for diagnostics.")
+    dbutils.notebook.exit("NO_FULL_WINDOW_ELIGIBLE_DIRTY_EVENTS")
 
-selected_entities = dirty_events.select(ENTITY_COL).distinct().orderBy(ENTITY_COL).limit(MAX_AFFECTED_ENTITIES)
-dirty_events = dirty_events.join(selected_entities, on=ENTITY_COL, how="inner")
+dirty_leg_update_markers = dirty_legs.groupBy("leg_no").agg(
+    F.max("max_update_key").alias("latest_dirty_update_key")
+)
+dirty_events_with_updates = dirty_events.join(dirty_leg_update_markers, on="leg_no", how="left")
+dirty_events_limited = dirty_events_with_updates.orderBy(
+    F.desc("latest_dirty_update_key"),
+    ENTITY_COL,
+    "dirty_event_date",
+    "leg_no",
+).limit(MAX_DIRTY_LEGS)
+
+selected_entities = (
+    dirty_events_limited.select(ENTITY_COL).distinct().orderBy(ENTITY_COL).limit(MAX_AFFECTED_ENTITIES)
+)
+dirty_events = dirty_events_limited.join(selected_entities, on=ENTITY_COL, how="inner")
 
 dirty_event_count = dirty_events.count()
-print(f"dirty taxi-out events after entity cap: {dirty_event_count}")
+print(f"mapped dirty taxi-out events after cap: {dirty_event_count}")
 if dirty_event_count == 0:
-    print("No dirty taxi-out events remain after optional entity filter and entity cap.")
-    dbutils.notebook.exit("NO_DIRTY_EVENTS_AFTER_ENTITY_FILTER")
+    print("No dirty taxi-out events remain after final dirty-event and entity caps.")
+    dbutils.notebook.exit("NO_DIRTY_EVENTS_AFTER_CAP")
 display(dirty_events.orderBy(ENTITY_COL, "dirty_event_date", "leg_no"))
 
 # COMMAND ----------

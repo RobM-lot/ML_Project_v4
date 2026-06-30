@@ -140,6 +140,7 @@ def test_pipeline_feature_store_resource_is_continuous_without_development_mode(
 
     assert pipeline["continuous"] is True
     assert pipeline.get("development") is not True
+    assert "      development: true" not in block
     assert "      serverless: true" in block
     assert "      channel: PREVIEW" in block
     assert "pipelines.trigger.interval" not in pipeline_text
@@ -148,10 +149,15 @@ def test_pipeline_feature_store_resource_is_continuous_without_development_mode(
 def test_dev_target_overrides_pipeline_to_continuous_non_development_mode():
     config = _load_yaml(DATABRICKS_PATH)
     dev = config["targets"]["dev"]
+    presets = dev["presets"]
     pipeline = dev["resources"]["pipelines"]["pipeline_ml_feature_store"]
 
-    assert dev["mode"] == "development"
-    assert dev["presets"]["pipelines_development"] is False
+    assert "mode" not in dev
+    assert presets["name_prefix"] == "[dev ${workspace.current_user.short_name}] "
+    assert presets["pipelines_development"] is False
+    assert presets["trigger_pause_status"] == "PAUSED"
+    assert presets["jobs_max_concurrent_runs"] == 10
+    assert presets["tags"]["dev"] == "${workspace.current_user.short_name}"
     assert pipeline["development"] is False
     assert pipeline["continuous"] is True
 
@@ -166,6 +172,13 @@ def test_dev_target_keeps_dev_catalog_schema_variables():
     assert dev_variables["silver_schema"] == "ml_ops"
     assert dev_variables["gold_catalog"] == "panda_gold_dev"
     assert dev_variables["gold_schema"] == "ml_ops"
+
+
+def test_dev_target_uses_existing_local_auth_profile():
+    dev_workspace = _load_yaml(DATABRICKS_PATH)["targets"]["dev"]["workspace"]
+
+    assert dev_workspace["host"] == "https://adb-5711108594958773.13.azuredatabricks.net/"
+    assert dev_workspace["profile"] == "ml-claims-dev"
 
 
 def test_final_daily_feature_trigger_interval_config_is_defined():

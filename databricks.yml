@@ -31,10 +31,14 @@ variables:
 
 targets:
   dev:
-    mode: development
     default: true
     presets:
+      name_prefix: "[dev ${workspace.current_user.short_name}] "
       pipelines_development: false
+      trigger_pause_status: PAUSED
+      jobs_max_concurrent_runs: 10
+      tags:
+        dev: ${workspace.current_user.short_name}
     variables:
       runtime_env: "dev"
       source_catalog: "panda_silver_prod"
@@ -45,17 +49,18 @@ targets:
       gold_schema: "ml_ops"
     workspace:
       host: https://adb-5711108594958773.13.azuredatabricks.net/
+      profile: ml-claims-dev
       root_path: /Workspace/Users/30002818@lot.pl/.bundle/${bundle.name}/${bundle.target}
-    permissions:
-      - group_name: databricks-panda-data-engineers
-        level: CAN_MANAGE
-      - user_name: 30002818@lot.pl
-        level: CAN_MANAGE
     resources:
       pipelines:
         pipeline_ml_feature_store:
           development: false
           continuous: true
+    permissions:
+      - group_name: databricks-panda-data-engineers
+        level: CAN_MANAGE
+      - user_name: 30002818@lot.pl
+        level: CAN_MANAGE
 
   prod:
     mode: production

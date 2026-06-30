@@ -69,40 +69,50 @@ The semantic output of the feature tables should remain unchanged. Row contents,
 feature formulas, table names, and training/scoring consumers should stay the
 same.
 
-## Deployment-mode fix after first Databricks validation
+## Bundle development-mode issue and fix
 
-The first manual Databricks validation showed that the pipeline still deployed
-as `Triggered`. The Databricks UI/API showed `"continuous": null` and
-`"development": true`, even though local `resources/pipeline.yml` had
-`continuous: true`.
+The first deploy after 30A still showed `Pipeline mode: Triggered`. The
+Databricks API/UI did not include `"continuous": true` and did not include
+`"development": false`, even though local `resources/pipeline.yml` had
+`continuous: true` and the dev target overrode the pipeline resource.
 
-The likely cause is bundle `mode: development` applying Lakeflow pipeline
-development mode during deployment. For Stage 30A continuous validation, the dev
-target now keeps the dev catalog/schema variables but explicitly deploys
-`pipeline_ml_feature_store` with:
+The likely cause is `targets.dev.mode: development`: Databricks Asset Bundles
+kept treating the target as a development deployment and prevented the
+continuous setting from being applied to the deployed Lakeflow pipeline.
 
-- `presets.pipelines_development: false`
-- `development: false`
-- `continuous: true`
+For Stage 30A continuous validation, `mode: development` was removed from
+`targets.dev`. The key development-mode behaviors are now explicit presets:
+
+- `name_prefix: "[dev ${workspace.current_user.short_name}] "`
+- `tags.dev: ${workspace.current_user.short_name}`
+- `trigger_pause_status: PAUSED`
+- `jobs_max_concurrent_runs: 10`
+- `pipelines_development: false`
 
 The dev target still uses `panda_silver_dev.ml_ops` and `panda_gold_dev.ml_ops`,
 with source data from `panda_silver_prod.occ_ops`.
+
+The feature store pipeline is explicitly configured in the dev target with:
+
+- `development: false`
+- `continuous: true`
 
 The per-flow `pipelines.trigger.interval` setting only becomes meaningful once
 the deployed pipeline is actually continuous.
 
 After manual deploy, verify:
 
+- The pipeline name remains the expected dev-prefixed name.
 - UI Pipeline mode is `Continuous`.
 - Pipeline JSON has `"continuous": true`.
 - Pipeline JSON has `"development": false`.
-- The run does not simply finish as a one-off `Refresh all`.
-- The event log shows automatic refresh near the expected interval.
+- Pipeline JSON still points to the dev target root path.
 - Final materialized view flows may still show `COMPLETE_RECOMPUTE`, which
   remains expected for 30A.
+- Automatic refresh appears near the expected interval.
 
-This deployment-mode fix is still a local configuration patch until manually
-deployed and validated in Databricks.
+This bundle development-mode fix is still a local configuration patch until
+manually deployed and validated in Databricks.
 
 ## Risks
 
@@ -131,6 +141,10 @@ No Databricks validation is performed as part of this local-only change.
 
 To roll back Stage 30A locally:
 
+- Restore `mode: development` in `targets.dev` if continuous mode creates
+  unacceptable dev operational behavior.
+- Remove the explicit `development: false` / `continuous: true` dev target
+  pipeline override if needed.
 - Remove `continuous: true` from `resources/pipeline.yml`.
 - Remove `spark_conf=FINAL_DAILY_FEATURE_SPARK_CONF` from the five final daily
   feature materialized views.

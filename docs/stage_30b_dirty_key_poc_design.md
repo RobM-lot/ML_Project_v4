@@ -388,6 +388,17 @@ Expected interpretation:
 - No eligible dirty events for a bounded version sample is inconclusive, not a
   production failure.
 
+## 30B-6 / 30C-0 Handoff
+
+30B-5 runtime parity passed for the partial-window batch CDF path. The project
+should not continue investigating notebook `readStream` for this target now.
+The 30C production direction is batch CDF polling by source-specific commit
+versions, followed by batch recompute and validation. Production writes,
+watermark persistence, and EMA remain deferred. The implementation-oriented
+handoff is in `docs/stage_30b6_30c0_taxi_out_production_design.md`, with
+read-only readiness diagnostics in
+`notebooks/16_stage30c0_taxi_out_production_readiness.py`.
+
 ## Relationship To 30A
 
 30A made the current feature-store pipeline able to run continuously and gave

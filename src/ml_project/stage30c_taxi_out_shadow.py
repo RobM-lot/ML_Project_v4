@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 if TYPE_CHECKING:
@@ -31,6 +32,12 @@ WATERMARK_COLUMNS = (
 )
 
 SHADOW_CANDIDATE_FLAG_COL = "_stage30c_has_candidate"
+TAXI_OUT_INCLUDED_LEG_TYPES = ("J", "C", "G")
+SUPPORTED_LEG_CDF_CHANGE_TYPES = ("insert", "update_preimage", "update_postimage", "delete")
+LEG_TIMES_ONLY_MAPPING_LIMITATION = (
+    "leg_times-only dirty keys can map to the current eligible leg row, but they cannot recover an old "
+    "dep_ap_sched/event_date mapping unless leg CDF preimage data or a historical leg snapshot is available."
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,30 @@ class SourceCdfWindow:
     @property
     def is_configured(self) -> bool:
         return self.starting_version is not None
+
+
+@dataclass(frozen=True)
+class DirtyEventRequirement:
+    leg_no: Any
+    dep_ap_sched: str
+    dirty_event_date: date
+    source_alias: str
+    dirty_sides: tuple[str, ...]
+    cdf_change_types: tuple[str, ...]
+    dirty_reason: str
+    limitation: str | None = None
+
+    @property
+    def key(self) -> tuple[str, date]:
+        return (self.dep_ap_sched, self.dirty_event_date)
+
+
+@dataclass(frozen=True)
+class ShadowMergeSourceValidation:
+    row_count: int
+    key_count: int
+    candidate_row_count: int
+    delete_row_count: int
 
 
 def _pyspark_sql():
@@ -76,6 +107,194 @@ def _sql_timestamp_or_null(value: str | None) -> str:
     if value is None:
         return "CAST(NULL AS TIMESTAMP)"
     return f"CAST({_sql_string(value)} AS TIMESTAMP)"
+
+
+def _row_value(row: Mapping[str, Any], column_name: str, default: Any = None) -> Any:
+    return row.get(column_name, default)
+
+
+def _as_event_date(value: date | datetime | str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value[:10])
+    raise TypeError(f"Unsupported event-date value: {value!r}")
+
+
+def _normalise_key_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _row_key(row: Mapping[str, Any]) -> tuple[Any, Any]:
+    missing = [column for column in TARGET_KEY_COLS if column not in row]
+    if missing:
+        raise ValueError(f"Row is missing target key columns: {missing}")
+    return (_row_value(row, "dep_ap_sched"), _normalise_key_value(_row_value(row, "event_date")))
+
+
+def _sorted_change_types(change_types: Iterable[str]) -> tuple[str, ...]:
+    order = {change_type: index for index, change_type in enumerate(SUPPORTED_LEG_CDF_CHANGE_TYPES)}
+    return tuple(sorted(set(change_types), key=lambda value: (order.get(value, 999), value)))
+
+
+def _sorted_dirty_sides(dirty_sides: Iterable[str]) -> tuple[str, ...]:
+    order = {"old": 0, "new": 1, "current": 2}
+    return tuple(sorted(set(dirty_sides), key=lambda value: (order.get(value, 999), value)))
+
+
+def is_taxi_out_eligible_leg_row(row: Mapping[str, Any] | None) -> bool:
+    if row is None:
+        return False
+    return (
+        _row_value(row, "counter") == 0
+        and _row_value(row, "leg_type") in TAXI_OUT_INCLUDED_LEG_TYPES
+        and _row_value(row, "leg_state") == "ARR"
+        and _row_value(row, "dep_ap_sched") is not None
+        and _row_value(row, "dep_sched_dt") is not None
+    )
+
+
+def classify_leg_cdf_dirty_sides(cdf_rows: Iterable[Mapping[str, Any]]) -> tuple[DirtyEventRequirement, ...]:
+    """Classify leg CDF rows into old/new dirty taxi-out event requirements.
+
+    `update_preimage` and `delete` rows represent old-side requirements.
+    `insert` and `update_postimage` rows represent new-side requirements.
+    Both sides are intentionally considered so removal and move cases are not
+    reduced to current/postimage-only dirty extraction.
+    """
+    return build_dirty_event_requirements_from_leg_cdf(cdf_rows)
+
+
+def build_dirty_event_requirements_from_leg_cdf(
+    cdf_rows: Iterable[Mapping[str, Any]],
+) -> tuple[DirtyEventRequirement, ...]:
+    grouped: dict[tuple[Any, str, date], dict[str, Any]] = {}
+
+    for row in cdf_rows:
+        change_type = _row_value(row, "_change_type")
+        if change_type not in SUPPORTED_LEG_CDF_CHANGE_TYPES:
+            raise ValueError(f"Unsupported leg CDF change type: {change_type!r}")
+        if not is_taxi_out_eligible_leg_row(row):
+            continue
+
+        side = "old" if change_type in {"update_preimage", "delete"} else "new"
+        leg_no = _row_value(row, "leg_no")
+        dep_ap_sched = _row_value(row, "dep_ap_sched")
+        dirty_event_date = _as_event_date(_row_value(row, "dep_sched_dt"))
+        key = (leg_no, dep_ap_sched, dirty_event_date)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "dirty_sides": set(),
+                "cdf_change_types": set(),
+            },
+        )
+        bucket["dirty_sides"].add(side)
+        bucket["cdf_change_types"].add(change_type)
+
+    requirements = [
+        DirtyEventRequirement(
+            leg_no=leg_no,
+            dep_ap_sched=dep_ap_sched,
+            dirty_event_date=dirty_event_date,
+            source_alias="leg",
+            dirty_sides=_sorted_dirty_sides(bucket["dirty_sides"]),
+            cdf_change_types=_sorted_change_types(bucket["cdf_change_types"]),
+            dirty_reason="taxi_out_dirty_leg_cdf_change",
+        )
+        for (leg_no, dep_ap_sched, dirty_event_date), bucket in grouped.items()
+    ]
+    return tuple(sorted(requirements, key=lambda req: (str(req.leg_no), req.dep_ap_sched, req.dirty_event_date)))
+
+
+def build_dirty_event_requirements_from_leg_times_cdf(
+    cdf_rows: Iterable[Mapping[str, Any]],
+    current_leg_rows: Iterable[Mapping[str, Any]],
+) -> tuple[DirtyEventRequirement, ...]:
+    """Map leg_times-only dirty leg_no values through current eligible leg rows.
+
+    This is a guarded fallback for leg_times-only CDF. It cannot recover old
+    entity/date mappings without leg CDF preimage data or a historical leg
+    snapshot; that limitation is carried in each returned requirement.
+    """
+    change_types_by_leg: dict[Any, set[str]] = {}
+    for row in cdf_rows:
+        change_type = _row_value(row, "_change_type")
+        if change_type not in SUPPORTED_LEG_CDF_CHANGE_TYPES:
+            raise ValueError(f"Unsupported leg_times CDF change type: {change_type!r}")
+        leg_no = _row_value(row, "leg_no")
+        if leg_no is None:
+            continue
+        change_types_by_leg.setdefault(leg_no, set()).add(change_type)
+
+    current_by_leg: dict[Any, Mapping[str, Any]] = {}
+    for row in current_leg_rows:
+        leg_no = _row_value(row, "leg_no")
+        if leg_no is None or not is_taxi_out_eligible_leg_row(row):
+            continue
+        existing = current_by_leg.get(leg_no)
+        if existing is None or (_row_value(row, "update_key", -1) or -1) > (_row_value(existing, "update_key", -1) or -1):
+            current_by_leg[leg_no] = row
+
+    requirements = []
+    for leg_no, change_types in change_types_by_leg.items():
+        current_row = current_by_leg.get(leg_no)
+        if current_row is None:
+            continue
+        requirements.append(
+            DirtyEventRequirement(
+                leg_no=leg_no,
+                dep_ap_sched=_row_value(current_row, "dep_ap_sched"),
+                dirty_event_date=_as_event_date(_row_value(current_row, "dep_sched_dt")),
+                source_alias="leg_times",
+                dirty_sides=("current",),
+                cdf_change_types=_sorted_change_types(change_types),
+                dirty_reason="taxi_out_dirty_leg_times_change_current_mapping",
+                limitation=LEG_TIMES_ONLY_MAPPING_LIMITATION,
+            )
+        )
+
+    return tuple(sorted(requirements, key=lambda req: (str(req.leg_no), req.dep_ap_sched, req.dirty_event_date)))
+
+
+def expand_dirty_event_requirements_to_affected_pairs(
+    requirements: Iterable[DirtyEventRequirement],
+) -> tuple[dict[str, Any], ...]:
+    affected: dict[tuple[str, date], dict[str, Any]] = {}
+    for requirement in requirements:
+        for offset in range(1, 31):
+            affected_date = requirement.dirty_event_date + timedelta(days=offset)
+            key = (requirement.dep_ap_sched, affected_date)
+            bucket = affected.setdefault(
+                key,
+                {
+                    "dep_ap_sched": requirement.dep_ap_sched,
+                    "event_date": affected_date,
+                    "dirty_event_dates": set(),
+                    "dirty_leg_nos": set(),
+                    "dirty_source_aliases": set(),
+                },
+            )
+            bucket["dirty_event_dates"].add(requirement.dirty_event_date)
+            bucket["dirty_leg_nos"].add(requirement.leg_no)
+            bucket["dirty_source_aliases"].add(requirement.source_alias)
+
+    rows = []
+    for row in affected.values():
+        rows.append(
+            {
+                "dep_ap_sched": row["dep_ap_sched"],
+                "event_date": row["event_date"],
+                "dirty_event_dates": tuple(sorted(row["dirty_event_dates"])),
+                "dirty_leg_nos": tuple(sorted(row["dirty_leg_nos"], key=str)),
+                "dirty_source_aliases": tuple(sorted(row["dirty_source_aliases"])),
+            }
+        )
+    return tuple(sorted(rows, key=lambda row: (row["dep_ap_sched"], row["event_date"])))
 
 
 def validate_dev_shadow_table_name(table_name: str, *, expected_suffix_or_token: str) -> None:
@@ -209,6 +428,88 @@ def build_shadow_replace_source(affected_pairs_df: "DataFrame", candidate_df: "D
             *[column for column in candidate_df.columns if column not in TARGET_KEY_COLS],
             SHADOW_CANDIDATE_FLAG_COL,
         )
+    )
+
+
+def build_shadow_replace_source_rows(
+    affected_pairs: Iterable[Mapping[str, Any]],
+    candidate_rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Pure-Python deterministic equivalent of the shadow merge source builder."""
+    affected_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for row in affected_pairs:
+        key = _row_key(row)
+        affected_by_key[key] = {
+            "dep_ap_sched": key[0],
+            "event_date": key[1],
+        }
+
+    candidate_by_key: dict[tuple[Any, Any], Mapping[str, Any]] = {}
+    for row in candidate_rows:
+        key = _row_key(row)
+        if key in candidate_by_key:
+            raise ValueError(f"Duplicate candidate key in shadow merge source: {key}")
+        candidate_by_key[key] = row
+
+    merge_rows = []
+    for key in sorted(affected_by_key, key=lambda item: (str(item[0]), item[1])):
+        candidate = candidate_by_key.get(key)
+        if candidate is None:
+            merge_rows.append(
+                {
+                    "dep_ap_sched": key[0],
+                    "event_date": key[1],
+                    SHADOW_CANDIDATE_FLAG_COL: False,
+                }
+            )
+            continue
+
+        row = dict(candidate)
+        row["dep_ap_sched"] = key[0]
+        row["event_date"] = key[1]
+        row[SHADOW_CANDIDATE_FLAG_COL] = True
+        merge_rows.append(row)
+
+    return tuple(merge_rows)
+
+
+def validate_shadow_merge_source(
+    merge_source_rows: Iterable[Mapping[str, Any]],
+    *,
+    affected_pairs: Iterable[Mapping[str, Any]] | None = None,
+) -> ShadowMergeSourceValidation:
+    """Validate the merge source used for update/insert/delete affected-key replacement."""
+    rows = tuple(merge_source_rows)
+    affected_keys = None
+    if affected_pairs is not None:
+        affected_keys = {_row_key(row) for row in affected_pairs}
+
+    seen_keys: set[tuple[Any, Any]] = set()
+    delete_count = 0
+    candidate_count = 0
+    for row in rows:
+        if SHADOW_CANDIDATE_FLAG_COL not in row:
+            raise ValueError(f"Merge source row is missing {SHADOW_CANDIDATE_FLAG_COL}.")
+        key = _row_key(row)
+        if key in seen_keys:
+            raise ValueError(f"Duplicate shadow merge source key: {key}")
+        seen_keys.add(key)
+        if affected_keys is not None and key not in affected_keys:
+            raise ValueError(f"Shadow merge source key is outside affected pairs: {key}")
+
+        has_candidate = bool(_row_value(row, SHADOW_CANDIDATE_FLAG_COL))
+        if has_candidate:
+            candidate_count += 1
+        else:
+            delete_count += 1
+            if affected_keys is not None and key not in affected_keys:
+                raise ValueError(f"Delete branch key is outside affected pairs: {key}")
+
+    return ShadowMergeSourceValidation(
+        row_count=len(rows),
+        key_count=len(seen_keys),
+        candidate_row_count=candidate_count,
+        delete_row_count=delete_count,
     )
 
 
@@ -390,6 +691,58 @@ def require_shadow_write_confirmation(
             "Stage 30C-1 dev-shadow writes require the exact confirmation string. "
             f"Enabled write flags: {enabled_flags}"
         )
+
+
+def validate_watermark_advance_preconditions(
+    *,
+    shadow_merge_executed: bool,
+    shadow_post_merge_validation_ok: bool,
+    processed_versions_by_alias: Mapping[str, int | None],
+    write_confirmation: str,
+    required_write_confirmation: str,
+    configured_source_aliases: Iterable[str] = SOURCE_ALIASES,
+    candidate_duplicate_key_count: int = 0,
+    candidate_null_key_count: int = 0,
+    shadow_duplicate_key_count: int = 0,
+    shadow_null_key_count: int = 0,
+    compare_failed: bool = False,
+    watermark_advance_requested: bool = True,
+) -> bool:
+    """Validate that source-specific watermarks may advance after shadow success."""
+    if not watermark_advance_requested:
+        return True
+    if write_confirmation != required_write_confirmation:
+        raise ValueError("Watermark advancement requires the exact dev-shadow write confirmation string.")
+    if not shadow_merge_executed:
+        raise ValueError("Watermark advancement requires shadow_merge_executed = True.")
+    if not shadow_post_merge_validation_ok:
+        raise ValueError("Watermark advancement requires successful post-merge shadow validation.")
+    if candidate_duplicate_key_count:
+        raise ValueError("Watermark advancement blocked by duplicate candidate keys.")
+    if candidate_null_key_count:
+        raise ValueError("Watermark advancement blocked by null candidate keys.")
+    if shadow_duplicate_key_count:
+        raise ValueError("Watermark advancement blocked by duplicate shadow keys.")
+    if shadow_null_key_count:
+        raise ValueError("Watermark advancement blocked by null shadow keys.")
+    if compare_failed:
+        raise ValueError("Watermark advancement blocked by failed compare status.")
+
+    configured = tuple(configured_source_aliases)
+    if not configured:
+        raise ValueError("Watermark advancement requires at least one configured source alias.")
+    unsupported = [source_alias for source_alias in configured if source_alias not in SOURCE_ALIASES]
+    if unsupported:
+        raise ValueError(f"Unsupported configured source aliases for watermark advancement: {unsupported}")
+    missing_versions = [
+        source_alias
+        for source_alias in configured
+        if source_alias not in processed_versions_by_alias or processed_versions_by_alias[source_alias] is None
+    ]
+    if missing_versions:
+        raise ValueError(f"Watermark advancement requires source-specific latest versions for: {missing_versions}")
+
+    return True
 
 
 def ensure_expected_columns(available_columns: Iterable[str], required_columns: Iterable[str]) -> tuple[str, ...]:

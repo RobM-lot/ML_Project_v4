@@ -192,3 +192,10 @@ only covers recent changes.
 
 No phase writes to source tables, the current MV, pipeline configuration, or
 production notebooks.
+
+## Stage 30C-2 Handoff
+
+Stage 30C-2 adds production guardrails around this shadow path: dirty/delete
+semantics for `leg` CDF preimage/postimage rows, leg_times-only mapping
+limitations, deterministic merge-source validation, source-specific watermark
+preconditions, and a separate Databricks Job runbook. It keeps the current MV read-only and leaves EMA deferred.

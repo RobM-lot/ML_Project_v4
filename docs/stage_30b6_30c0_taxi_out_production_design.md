@@ -320,3 +320,12 @@ properties, checkpoints, or production outputs.
 - no stream aggregations;
 - rollback and retry behavior documented;
 - EMA explicitly deferred until separately designed.
+
+## Stage 30C-1 Handoff
+
+Stage 30C-1 implements the shadow-first path recommended by this design. The
+current `panda_silver_dev.ml_ops.ft_airport_daily_taxi_out` materialized view
+remains untouched and read-only; the materialized view still remains untouched and read-only. Optional writes are
+limited to the dev-only shadow/control tables and remain gated behind explicit
+flags plus the write confirmation string. Source-specific watermark advancement remains gated until after a successful
+shadow merge and post-merge validation.

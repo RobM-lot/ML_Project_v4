@@ -22,6 +22,9 @@ change production pipelines, feature logic, training, scoring, or table names.
   OCC_OPS / Netline source tables without stream aggregation or production
   writes. 30B-4b uses the existing source CDF feed after plain source streaming
   proved unsupported from notebooks.
+- 30B-5: use runtime-confirmed batch CDF reads, with source-specific commit
+  versions, for an end-to-end read-only parity POC against
+  `ft_airport_daily_taxi_out`.
 
 ## Why Dirty Keys, Not Streaming Aggregates
 
@@ -310,6 +313,80 @@ Limitations and risks:
 - EMA remains deferred.
 - The notebook still does not implement partial recompute, production writes,
   dirty-key tables, or any 30C write strategy.
+
+## 30B-5 Batch CDF End-to-end Taxi-out Parity POC
+
+30B-5 stops investigating stream behavior for now. Plain readStream failed
+against the OCC_OPS source objects, and CDF stream behavior from notebooks is
+still unstable or unconfirmed. Batch CDF reads are runtime-confirmed for both
+source tables:
+
+- `panda_silver_prod.occ_ops.netline___schedops__leg`
+- `panda_silver_prod.occ_ops.netline___schedops__leg_times`
+
+The 30B-5 notebook therefore uses source-specific CDF commit versions as the
+dirty-key polling input. It is still read-only and diagnostic:
+
+- it reads each configured source with `readChangeFeed = true`;
+- each source has its own starting and ending CDF version controls;
+- it extracts dirty `leg_no` values and preserves source alias plus CDF metadata;
+- it maps dirty legs through the current source `leg` state to taxi-out
+  `dep_ap_sched` / dirty event date candidates;
+- it expands dirty event date `D` to output dates `D+1 ... D+30`;
+- it builds the same entity-scoped non-EMA candidate used by 30B-2 / 30B-3;
+- it filters the current `ft_airport_daily_taxi_out` MV to affected
+  entity/date pairs before comparing;
+- it reports parity status counts and mismatch samples.
+
+The notebook defaults to `RUN_PARITY = False` and requires an explicit CDF
+starting version for at least one source before it reads any change feed. This
+prevents accidental broad CDF scans.
+
+Acceptance criteria:
+
+- batch CDF can be read for the configured source-specific versions;
+- required source and CDF metadata columns are available;
+- dirty leg/source candidates are produced from CDF rows;
+- CDF metadata such as `_change_type`, `_commit_version`, and
+  `_commit_timestamp` is visible for diagnosis;
+- dirty candidates can be mapped to eligible taxi-out dirty events;
+- full affected-window eligibility can be enforced against the current MV
+  horizon;
+- candidate non-EMA rows and current MV rows are compared only for affected
+  entity/date pairs;
+- no stream path, source mutation, production write, pipeline update, or feature
+  math change is introduced.
+
+Out of scope:
+
+- streaming checkpoint design;
+- production dirty-key tables;
+- partial update write strategy;
+- CDF enablement or source table property changes;
+- handling all `update_preimage` / `update_postimage` edge cases as production
+  semantics;
+- ARR -> non-ARR removals, entity/date moves, and tombstone-style dirty ranges;
+- EMA partial recompute.
+
+Manual run procedure:
+
+1. Run `notebooks/15_stage30b5_end_to_end_batch_cdf_parity.py` with
+   `RUN_PARITY = False` and review the config.
+2. Set `RUN_PARITY = True`.
+3. Set `LEG_CDF_STARTING_VERSION` / `LEG_CDF_ENDING_VERSION` and/or
+   `LEG_TIMES_CDF_STARTING_VERSION` / `LEG_TIMES_CDF_ENDING_VERSION`.
+4. Optionally set `ENTITY_FILTER` and caps if the sample is too large.
+5. Run once manually and capture CDF counts, dirty-event counts, affected-output
+   counts, scoped candidate/current row counts, and parity status counts.
+
+Expected interpretation:
+
+- Matched scoped rows support batch CDF polling as a viable dirty-key detector
+  for later design work.
+- Mismatches should be analyzed against candidate math, source current-state
+  mapping, null behavior, date filters, and EMA-excluded columns.
+- No eligible dirty events for a bounded version sample is inconclusive, not a
+  production failure.
 
 ## Relationship To 30A
 

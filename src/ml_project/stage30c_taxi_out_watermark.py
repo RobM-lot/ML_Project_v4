@@ -36,6 +36,14 @@ WATERMARK_SCHEMA_INCOMPATIBLE = "watermark_schema_incompatible"
 WATERMARK_ADVANCE_PASS = "watermark_advance_pass"
 BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY = "candidate_only_requires_human_confirmation"
 BOOTSTRAP_PREFLIGHT_MISSING_CANDIDATE = "candidate_missing_requires_manual_review"
+BOOTSTRAP_PREFLIGHT_BLOCKED_SOURCE_HISTORY_VIEW = "bootstrap_preflight_blocked_source_history_view"
+BOOTSTRAP_PREFLIGHT_BLOCKED_SOURCE_HISTORY_UNAVAILABLE = "bootstrap_preflight_blocked_source_history_unavailable"
+SOURCE_HISTORY_UNAVAILABLE_FOR_VIEW = "source_history_unavailable_for_view"
+SOURCE_HISTORY_READY = "source_history_ready"
+SOURCE_HISTORY_UNAVAILABLE = "source_history_unavailable"
+UC_OBJECT_TABLE = "table"
+UC_OBJECT_VIEW = "view"
+UC_OBJECT_UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -156,6 +164,91 @@ def build_bootstrap_version_candidate(
         shadow_baseline_timestamp=baseline.isoformat(sep=" "),
         status=BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY,
     )
+
+
+def classify_uc_object_type(object_type: Any) -> str:
+    if object_type is None:
+        return UC_OBJECT_UNKNOWN
+    normalized = str(object_type).strip().lower().replace("_", " ")
+    if "view" in normalized:
+        return UC_OBJECT_VIEW
+    if normalized in {"table", "managed", "external", "managed table", "external table"}:
+        return UC_OBJECT_TABLE
+    if "table" in normalized:
+        return UC_OBJECT_TABLE
+    return UC_OBJECT_UNKNOWN
+
+
+def validate_history_source_is_table(
+    *,
+    source_alias: str,
+    logical_source_name: str,
+    history_source_name: str,
+    object_type: Any,
+) -> dict[str, Any]:
+    classified_type = classify_uc_object_type(object_type)
+    status = SOURCE_HISTORY_READY
+    can_describe_history = True
+    message = "History object is a physical table."
+
+    if classified_type == UC_OBJECT_VIEW:
+        status = SOURCE_HISTORY_UNAVAILABLE_FOR_VIEW
+        can_describe_history = False
+        message = (
+            "Configured source history object is a VIEW. Provide physical Delta table in "
+            "SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE."
+        )
+    elif classified_type != UC_OBJECT_TABLE:
+        status = SOURCE_HISTORY_UNAVAILABLE
+        can_describe_history = False
+        message = (
+            "Configured source history object type is not known to support DESCRIBE HISTORY. "
+            "Provide physical Delta table in SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE."
+        )
+
+    return {
+        "source_alias": source_alias,
+        "logical_source_name": logical_source_name,
+        "history_source_name": history_source_name,
+        "object_type": object_type,
+        "classified_object_type": classified_type,
+        "can_describe_history": can_describe_history,
+        "status": status,
+        "message": message,
+    }
+
+
+def build_bootstrap_preflight_status_for_history_sources(
+    history_source_statuses: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    statuses = tuple(dict(status) for status in history_source_statuses)
+    blocked = [status for status in statuses if not status.get("can_describe_history")]
+    if not blocked:
+        return {
+            "status": BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY,
+            "history_sources": statuses,
+            "message": "History sources are physical tables; candidate bootstrap versions can be computed.",
+        }
+
+    view_blocked = [
+        status for status in blocked if status.get("status") == SOURCE_HISTORY_UNAVAILABLE_FOR_VIEW
+    ]
+    if view_blocked:
+        status = BOOTSTRAP_PREFLIGHT_BLOCKED_SOURCE_HISTORY_VIEW
+        message = (
+            "Configured source history object is a VIEW. Provide physical Delta table in "
+            "SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE."
+        )
+    else:
+        status = BOOTSTRAP_PREFLIGHT_BLOCKED_SOURCE_HISTORY_UNAVAILABLE
+        message = "Source history is unavailable; provide physical Delta history table overrides."
+
+    return {
+        "status": status,
+        "history_sources": statuses,
+        "blocked_history_sources": tuple(blocked),
+        "message": message,
+    }
 
 
 def _quote_identifier(identifier: str) -> str:

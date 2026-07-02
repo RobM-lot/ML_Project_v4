@@ -314,6 +314,38 @@ def test_bootstrap_candidate_is_missing_when_no_source_history_precedes_baseline
     assert candidate.status == watermark.BOOTSTRAP_PREFLIGHT_MISSING_CANDIDATE
 
 
+def test_bootstrap_history_source_view_blocks_before_history_lookup():
+    view_status = watermark.validate_history_source_is_table(
+        source_alias="leg",
+        logical_source_name="panda_silver_prod.occ_ops.netline___schedops__leg",
+        history_source_name="panda_silver_prod.occ_ops.netline___schedops__leg",
+        object_type="VIEW",
+    )
+    preflight_status = watermark.build_bootstrap_preflight_status_for_history_sources([view_status])
+
+    assert watermark.classify_uc_object_type("VIEW") == watermark.UC_OBJECT_VIEW
+    assert view_status["status"] == watermark.SOURCE_HISTORY_UNAVAILABLE_FOR_VIEW
+    assert not view_status["can_describe_history"]
+    assert preflight_status["status"] == watermark.BOOTSTRAP_PREFLIGHT_BLOCKED_SOURCE_HISTORY_VIEW
+    assert "Provide physical Delta table" in preflight_status["message"]
+
+
+def test_bootstrap_history_physical_override_is_supported():
+    override_status = watermark.validate_history_source_is_table(
+        source_alias="leg_times",
+        logical_source_name="panda_silver_prod.occ_ops.netline___schedops__leg_times",
+        history_source_name="panda_silver_prod.occ_ops.physical_leg_times_delta",
+        object_type="MANAGED",
+    )
+    preflight_status = watermark.build_bootstrap_preflight_status_for_history_sources([override_status])
+
+    assert watermark.classify_uc_object_type("MANAGED") == watermark.UC_OBJECT_TABLE
+    assert override_status["logical_source_name"] != override_status["history_source_name"]
+    assert override_status["status"] == watermark.SOURCE_HISTORY_READY
+    assert override_status["can_describe_history"]
+    assert preflight_status["status"] == watermark.BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -401,8 +433,18 @@ def test_stage_30c5b_bootstrap_preflight_is_read_only_candidate_output():
     assert "RUN_BOOTSTRAP_PREFLIGHT = False" in source
     assert "ALLOW_WATERMARK_BOOTSTRAP = False" in source
     assert "DRY_RUN_ONLY = True" in source
-    assert "candidate_only_requires_human_confirmation" in source
+    assert "SOURCE_LEG_HISTORY_TABLE = None" in source
+    assert "SOURCE_LEG_TIMES_HISTORY_TABLE = None" in source
+    assert '"logical_source_name": SOURCE_LEG' in source
+    assert '"history_source_name": SOURCE_LEG_HISTORY_TABLE or SOURCE_LEG' in source
+    assert '"logical_source_name": SOURCE_LEG_TIMES' in source
+    assert '"history_source_name": SOURCE_LEG_TIMES_HISTORY_TABLE or SOURCE_LEG_TIMES' in source
+    assert "BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY" in source
     assert "CANDIDATE ONLY - requires human confirmation." in source
+    assert 'if history_preflight_status["status"] != BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY' in source
+    assert "Configured source history object is a VIEW" in source
+    assert "Provide physical Delta table in " in source
+    assert "SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE" in source
     assert "shadow_earliest_history_operation" in source
     assert "shadow_latest_history_operation" in source
     assert "candidate_bootstrap_versions" in source
@@ -439,6 +481,17 @@ def test_stage_30c5b_bootstrap_preflight_is_read_only_candidate_output():
     assert not _has_write_target(source, WATERMARK_TABLE)
 
 
+def test_stage_30c5b_bootstrap_preflight_validates_table_type_before_describe_history():
+    source = _read(BOOTSTRAP_PREFLIGHT_PATH)
+
+    object_type_pos = source.index("object_type = _uc_object_type(history_source_name)")
+    validate_pos = source.index("history_status = validate_history_source_is_table(")
+    guard_pos = source.index('if not history_status["can_describe_history"]:')
+    describe_pos = source.index('spark.sql(f"DESCRIBE HISTORY')
+
+    assert object_type_pos < validate_pos < guard_pos < describe_pos
+
+
 def test_stage_30c5b_bootstrap_preflight_does_not_use_validation_windows_as_baseline():
     source = _read(BOOTSTRAP_PREFLIGHT_PATH)
 
@@ -462,6 +515,10 @@ def test_stage_30c5_docs_cover_watermark_safety_and_bootstrap():
         "Earlier Stage 30C-1 dev watermark tables",
         "ALLOW_WATERMARK_SCHEMA_MIGRATION = False",
         "additive schema migration path",
+        "SOURCE_LEG_HISTORY_TABLE",
+        "bootstrap_preflight_blocked_source_history_view",
+        "Configured source history object is a VIEW",
+        "does not parse view definitions",
         "watermark_bootstrap_required",
         "do not infer baseline versions from validation windows",
         "contiguous",

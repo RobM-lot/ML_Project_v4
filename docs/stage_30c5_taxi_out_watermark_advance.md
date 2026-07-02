@@ -74,6 +74,14 @@ Defaults are safe:
 - `ALLOW_WATERMARK_BOOTSTRAP = False`;
 - `DRY_RUN_ONLY = True`.
 
+Logical source objects and history objects are separated:
+
+- `SOURCE_LEG` and `SOURCE_LEG_TIMES` remain the logical CDF/read sources;
+- `SOURCE_LEG_HISTORY_TABLE` and `SOURCE_LEG_TIMES_HISTORY_TABLE` are optional
+  physical Delta table overrides used only for `DESCRIBE HISTORY`;
+- if a history override is unset, the logical source object is used as the
+  history target.
+
 The preflight does not write bootstrap rows and does not advance watermarks. It
 only inspects retained Delta history for:
 
@@ -87,6 +95,16 @@ The candidate baseline logic uses the earliest shadow table history timestamp
 as the shadow baseline timestamp, then selects each source table version at or
 immediately before that timestamp. It also displays the latest shadow history
 operation for context.
+
+Before running `DESCRIBE HISTORY`, the preflight checks whether each history
+target is a physical table. If a configured source history object is a view, the
+notebook does not call `DESCRIBE HISTORY` on it and exits with
+`bootstrap_preflight_blocked_source_history_view`. The output says:
+`Configured source history object is a VIEW. Provide physical Delta table in
+SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE.`
+
+The preflight does not parse view definitions, does not infer physical base
+tables from views, and does not silently continue with missing source history.
 
 The output is candidate-only, not authoritative. It must be reviewed by a
 human before any separate gated bootstrap insert is considered. The preflight

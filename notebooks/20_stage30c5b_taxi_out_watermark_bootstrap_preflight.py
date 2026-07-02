@@ -23,6 +23,8 @@ DRY_RUN_ONLY = True
 
 SOURCE_LEG = "panda_silver_prod.occ_ops.netline___schedops__leg"
 SOURCE_LEG_TIMES = "panda_silver_prod.occ_ops.netline___schedops__leg_times"
+SOURCE_LEG_HISTORY_TABLE = None
+SOURCE_LEG_TIMES_HISTORY_TABLE = None
 SHADOW_TAXI_OUT_TABLE = "panda_silver_dev.ml_ops.stage30c_ft_airport_daily_taxi_out_shadow"
 WATERMARK_TABLE = "panda_silver_dev.ml_ops.stage30c_taxi_out_watermarks"
 
@@ -45,6 +47,8 @@ CONFIG_ROWS = [
     ("DRY_RUN_ONLY", str(DRY_RUN_ONLY)),
     ("SOURCE_LEG", SOURCE_LEG),
     ("SOURCE_LEG_TIMES", SOURCE_LEG_TIMES),
+    ("SOURCE_LEG_HISTORY_TABLE", str(SOURCE_LEG_HISTORY_TABLE)),
+    ("SOURCE_LEG_TIMES_HISTORY_TABLE", str(SOURCE_LEG_TIMES_HISTORY_TABLE)),
     ("SHADOW_TAXI_OUT_TABLE", SHADOW_TAXI_OUT_TABLE),
     ("WATERMARK_TABLE", WATERMARK_TABLE),
 ]
@@ -102,13 +106,16 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from ml_project.stage30c_taxi_out_watermark import (  # noqa: E402
+    BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY,
     SOURCE_ALIASES,
     build_bootstrap_version_candidate,
+    build_bootstrap_preflight_status_for_history_sources,
     detect_missing_watermark_columns,
     earliest_delta_history_entry,
     latest_delta_history_entry,
     quote_table_name,
     summarize_delta_history_entry,
+    validate_history_source_is_table,
 )
 
 print(f"Project root: {PROJECT_ROOT}")
@@ -117,13 +124,33 @@ print(f"Loaded local helper modules from: {SRC_PATH}")
 # COMMAND ----------
 
 
-def _delta_history_rows(table_name: str):
+def _uc_object_type(table_name: str):
+    table = spark.catalog.getTable(table_name)
+    return table.tableType
+
+
+def _safe_describe_history_table_only(
+    *,
+    source_alias: str,
+    logical_source_name: str,
+    history_source_name: str,
+):
+    object_type = _uc_object_type(history_source_name)
+    history_status = validate_history_source_is_table(
+        source_alias=source_alias,
+        logical_source_name=logical_source_name,
+        history_source_name=history_source_name,
+        object_type=object_type,
+    )
+    if not history_status["can_describe_history"]:
+        return [], history_status
+
     history_df = (
-        spark.sql(f"DESCRIBE HISTORY {quote_table_name(table_name)}")
+        spark.sql(f"DESCRIBE HISTORY {quote_table_name(history_source_name)}")
         .select("version", "timestamp", "operation", "operationParameters")
         .orderBy(F.col("version").asc())
     )
-    return [row.asDict(recursive=True) for row in history_df.collect()]
+    return [row.asDict(recursive=True) for row in history_df.collect()], history_status
 
 
 def _watermark_rows_and_schema():
@@ -143,16 +170,76 @@ def _watermark_rows_and_schema():
     return rows, columns, messages
 
 
-shadow_history = _delta_history_rows(SHADOW_TAXI_OUT_TABLE)
+source_history_targets = {
+    "leg": {
+        "logical_source_name": SOURCE_LEG,
+        "history_source_name": SOURCE_LEG_HISTORY_TABLE or SOURCE_LEG,
+    },
+    "leg_times": {
+        "logical_source_name": SOURCE_LEG_TIMES,
+        "history_source_name": SOURCE_LEG_TIMES_HISTORY_TABLE or SOURCE_LEG_TIMES,
+    },
+}
+
+shadow_history, shadow_history_status = _safe_describe_history_table_only(
+    source_alias="shadow",
+    logical_source_name=SHADOW_TAXI_OUT_TABLE,
+    history_source_name=SHADOW_TAXI_OUT_TABLE,
+)
+if not shadow_history_status["can_describe_history"]:
+    watermark_rows, watermark_schema, watermark_schema_messages = _watermark_rows_and_schema()
+    blocked_summary = {
+        "status": shadow_history_status["status"],
+        "message": shadow_history_status["message"],
+        "shadow_history_status": shadow_history_status,
+        "current_watermark_schema": watermark_schema,
+        "current_watermark_schema_messages": watermark_schema_messages,
+        "current_watermark_rows": watermark_rows,
+        "next_step": "Provide a physical Delta shadow table before candidate baseline discovery.",
+    }
+    print(blocked_summary["message"])
+    display(spark.createDataFrame(_display_metric_rows(blocked_summary), ["metric", "value"]))
+    dbutils.notebook.exit(shadow_history_status["status"])
+
+source_histories = {}
+source_history_statuses = []
+for source_alias, target in source_history_targets.items():
+    history_rows, history_status = _safe_describe_history_table_only(
+        source_alias=source_alias,
+        logical_source_name=target["logical_source_name"],
+        history_source_name=target["history_source_name"],
+    )
+    source_histories[source_alias] = history_rows
+    source_history_statuses.append(history_status)
+
+history_preflight_status = build_bootstrap_preflight_status_for_history_sources(source_history_statuses)
+if history_preflight_status["status"] != BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY:
+    watermark_rows, watermark_schema, watermark_schema_messages = _watermark_rows_and_schema()
+    blocked_summary = {
+        "status": history_preflight_status["status"],
+        "message": history_preflight_status["message"],
+        "history_sources": history_preflight_status["history_sources"],
+        "shadow_history_status": shadow_history_status,
+        "current_watermark_schema": watermark_schema,
+        "current_watermark_schema_messages": watermark_schema_messages,
+        "current_watermark_rows": watermark_rows,
+        "next_step": (
+            "Configured source history object is a VIEW. Provide physical Delta table in "
+            "SOURCE_LEG_HISTORY_TABLE / SOURCE_LEG_TIMES_HISTORY_TABLE."
+        ),
+    }
+    print(blocked_summary["message"])
+    print(blocked_summary["next_step"])
+    print("Do not parse view definitions automatically and do not infer physical base tables.")
+    print("Do not use latest versions or validation windows as bootstrap baselines.")
+    display(spark.createDataFrame(_display_metric_rows(blocked_summary), ["metric", "value"]))
+    dbutils.notebook.exit(history_preflight_status["status"])
+
 shadow_earliest = earliest_delta_history_entry(shadow_history)
 shadow_latest = latest_delta_history_entry(shadow_history)
 shadow_earliest_summary = summarize_delta_history_entry(shadow_earliest)
 shadow_latest_summary = summarize_delta_history_entry(shadow_latest)
 
-source_histories = {
-    "leg": _delta_history_rows(SOURCE_LEG),
-    "leg_times": _delta_history_rows(SOURCE_LEG_TIMES),
-}
 candidate_rows = []
 for source_alias, history_rows in source_histories.items():
     candidate = build_bootstrap_version_candidate(
@@ -174,10 +261,11 @@ for source_alias, history_rows in source_histories.items():
 watermark_rows, watermark_schema, watermark_schema_messages = _watermark_rows_and_schema()
 
 summary = {
-    "status": "candidate_only_requires_human_confirmation",
+    "status": BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY,
     "shadow_table": SHADOW_TAXI_OUT_TABLE,
     "shadow_earliest_history_operation": shadow_earliest_summary,
     "shadow_latest_history_operation": shadow_latest_summary,
+    "history_sources": history_preflight_status["history_sources"],
     "candidate_bootstrap_versions": candidate_rows,
     "current_watermark_schema": watermark_schema,
     "current_watermark_schema_messages": watermark_schema_messages,

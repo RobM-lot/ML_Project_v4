@@ -69,6 +69,19 @@ def test_stage_30c4_notebook_defaults_are_safe():
     assert "exiting before reads or writes" in source
 
 
+def test_stage_30c4_notebook_uses_display_safe_metric_rows():
+    source = _read(NOTEBOOK_PATH)
+
+    assert "import json" in source
+    assert "def _display_value(value):" in source
+    assert "def _display_metric_rows(mapping):" in source
+    assert "json.dumps(value, default=str, sort_keys=True)" in source
+    assert "spark.createDataFrame([window_result])" not in source
+    assert "spark.createDataFrame(window_results)" not in source
+    assert "_display_metric_rows(window_result)" in source
+    assert '["window_id", "metric", "value"]' in source
+
+
 def test_stage_30c4_multi_window_defaults_and_json_override_exist():
     source = _read(NOTEBOOK_PATH)
 

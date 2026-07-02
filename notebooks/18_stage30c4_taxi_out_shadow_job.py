@@ -2,6 +2,7 @@
 # ruff: noqa: F821
 # Stage 30C-4 job-style taxi-out shadow validation and overlap-aware execution.
 
+import json
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -91,6 +92,18 @@ VALIDATION_WINDOWS_JSON = ""
 
 def source_table(table_name: str) -> str:
     return f"{SOURCE_CATALOG}.{SOURCE_SCHEMA}.{table_name}"
+
+
+def _display_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, default=str, sort_keys=True)
+    return str(value)
+
+
+def _display_metric_rows(mapping):
+    return [(str(key), _display_value(value)) for key, value in mapping.items()]
 
 
 CONFIG_ROWS = [
@@ -495,7 +508,12 @@ for window in validation_windows:
         require_validation_overlap=REQUIRE_VALIDATION_OVERLAP,
     )
     window_results.append(window_result)
-    display(spark.createDataFrame([window_result]))
+    display(
+        spark.createDataFrame(
+            _display_metric_rows(window_result),
+            ["metric", "value"],
+        )
+    )
 
 # COMMAND ----------
 
@@ -508,10 +526,19 @@ job_summary = summarize_job_result(
     watermarks_advanced=False,
 )
 print("Stage 30C-4 job window results")
-display(spark.createDataFrame(window_results))
+display(
+    spark.createDataFrame(
+        [
+            (result["window_id"], key, _display_value(value))
+            for result in window_results
+            for key, value in result.items()
+        ],
+        ["window_id", "metric", "value"],
+    )
+)
 
 print("Stage 30C-4 overall output")
-display(spark.createDataFrame([(key, str(value)) for key, value in job_summary.items()], ["metric", "value"]))
+display(spark.createDataFrame(_display_metric_rows(job_summary), ["metric", "value"]))
 
 watermarks_advanced = False
 if JOB_MODE == "watermark_advance" and ALLOW_WATERMARK_ADVANCE:
@@ -564,7 +591,7 @@ final_boolean_summary = {
 }
 
 print("Stage 30C-4 final boolean summary")
-display(spark.createDataFrame([(key, str(value)) for key, value in final_boolean_summary.items()], ["check_name", "passed"]))
+display(spark.createDataFrame(_display_metric_rows(final_boolean_summary), ["check_name", "passed"]))
 
 if not final_boolean_summary["overall_pass"]:
     raise ValueError("Stage 30C-4 job validation did not meet the configured pass criteria.")

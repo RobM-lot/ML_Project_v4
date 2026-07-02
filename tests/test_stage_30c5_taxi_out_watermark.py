@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import re
 import sys
@@ -23,6 +24,34 @@ SOURCE_TABLES = {
 CURRENT_MV = "panda_silver_dev.ml_ops.ft_airport_daily_taxi_out"
 SHADOW_TABLE = "panda_silver_dev.ml_ops.stage30c_ft_airport_daily_taxi_out_shadow"
 WATERMARK_TABLE = "panda_silver_dev.ml_ops.stage30c_taxi_out_watermarks"
+WATERMARK_MODULE_IMPORT = "ml_project.stage30c_taxi_out_watermark"
+WATERMARK_NOTEBOOK_PATHS = (NOTEBOOK_PATH, BOOTSTRAP_PREFLIGHT_PATH)
+EXPECTED_NOTEBOOK_WATERMARK_HELPERS = {
+    "BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY",
+    "DEFAULT_STAGE_NAME",
+    "SOURCE_ALIASES",
+    "SourceWindow",
+    "build_bootstrap_preflight_status_for_history_sources",
+    "build_bootstrap_version_candidate",
+    "build_next_source_windows_from_watermarks",
+    "build_watermark_advance_merge_sql",
+    "build_watermark_advance_rows",
+    "build_watermark_schema_migration_sql",
+    "classify_watermark_run_status",
+    "detect_missing_watermark_columns",
+    "earliest_delta_history_entry",
+    "latest_delta_history_entry",
+    "quote_table_name",
+    "summarize_delta_history_entry",
+    "summarize_watermark_run",
+    "validate_contiguous_source_window",
+    "validate_explicit_window_against_watermark",
+    "validate_history_source_is_table",
+    "validate_watermark_advance_gates",
+    "validate_watermark_rows",
+    "validate_watermark_schema",
+    "validate_watermark_schema_migration_gates",
+}
 
 _SPEC = importlib.util.spec_from_file_location("stage30c_taxi_out_watermark", MODULE_PATH)
 assert _SPEC is not None
@@ -50,6 +79,15 @@ def _has_write_target(source: str, table_name: str) -> bool:
     return any(re.search(pattern, source, flags=re.IGNORECASE | re.DOTALL) for pattern in patterns)
 
 
+def _stage30c_watermark_imports(path: Path) -> tuple[str, ...]:
+    tree = ast.parse(_read(path), filename=str(path))
+    symbols = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == WATERMARK_MODULE_IMPORT:
+            symbols.extend(alias.name for alias in node.names)
+    return tuple(symbols)
+
+
 def test_stage_30c5_files_exist():
     assert MODULE_PATH.exists()
     assert NOTEBOOK_PATH.exists()
@@ -70,6 +108,66 @@ def test_stage_30c5_notebook_defaults_are_safe():
     assert 'REQUIRED_WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_DEV_SHADOW_TABLES_ONLY"' in source
     assert "RUN_WATERMARK_ADVANCE_FALSE" in source
     assert "exiting before reads or writes" in source
+
+
+def test_stage_30c5_notebook_watermark_imports_exist_in_module():
+    imports_by_notebook = {
+        path.name: _stage30c_watermark_imports(path)
+        for path in WATERMARK_NOTEBOOK_PATHS
+    }
+
+    assert imports_by_notebook["19_stage30c5_taxi_out_watermark_advance.py"] == (
+        "DEFAULT_STAGE_NAME",
+        "SOURCE_ALIASES",
+        "SourceWindow",
+        "build_next_source_windows_from_watermarks",
+        "build_watermark_schema_migration_sql",
+        "build_watermark_advance_merge_sql",
+        "build_watermark_advance_rows",
+        "classify_watermark_run_status",
+        "detect_missing_watermark_columns",
+        "summarize_watermark_run",
+        "validate_contiguous_source_window",
+        "validate_explicit_window_against_watermark",
+        "validate_watermark_advance_gates",
+        "validate_watermark_rows",
+        "validate_watermark_schema",
+        "validate_watermark_schema_migration_gates",
+    )
+    assert imports_by_notebook["20_stage30c5b_taxi_out_watermark_bootstrap_preflight.py"] == (
+        "BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY",
+        "SOURCE_ALIASES",
+        "build_bootstrap_version_candidate",
+        "build_bootstrap_preflight_status_for_history_sources",
+        "detect_missing_watermark_columns",
+        "earliest_delta_history_entry",
+        "latest_delta_history_entry",
+        "quote_table_name",
+        "summarize_delta_history_entry",
+        "validate_history_source_is_table",
+    )
+
+    missing = {
+        notebook_name: [symbol for symbol in symbols if symbol == "*" or not hasattr(watermark, symbol)]
+        for notebook_name, symbols in imports_by_notebook.items()
+    }
+    assert missing == {
+        "19_stage30c5_taxi_out_watermark_advance.py": [],
+        "20_stage30c5b_taxi_out_watermark_bootstrap_preflight.py": [],
+    }
+
+
+def test_stage_30c5_public_watermark_api_covers_notebook_helpers():
+    imported_helpers = {
+        symbol
+        for path in WATERMARK_NOTEBOOK_PATHS
+        for symbol in _stage30c_watermark_imports(path)
+    }
+
+    assert imported_helpers == EXPECTED_NOTEBOOK_WATERMARK_HELPERS
+    for symbol in EXPECTED_NOTEBOOK_WATERMARK_HELPERS:
+        assert hasattr(watermark, symbol), symbol
+        assert symbol in watermark.__all__, symbol
 
 
 def test_watermark_schema_requires_explicit_column_names():

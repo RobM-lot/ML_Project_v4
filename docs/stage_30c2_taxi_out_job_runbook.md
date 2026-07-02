@@ -84,3 +84,11 @@ job-style runner for this runbook. It supports multiple explicit CDF windows,
 caps cannot select only affected keys with zero candidate/current overlap. The
 runner remains separate from the Lakeflow pipeline definition and keeps
 watermark advancement disabled by default.
+
+## Stage 30C-5 Handoff
+
+Stage 30C-5 adds `notebooks/19_stage30c5_taxi_out_watermark_advance.py` as a
+dedicated watermark-advance preflight. It must not use the non-contiguous
+Stage 30C-4 A/B/C validation windows to advance watermarks. Source-specific
+watermarks can advance only after a complete contiguous source window has been
+processed, shadow-merged, and post-merge validated.

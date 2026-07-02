@@ -158,3 +158,11 @@ WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_DEV_SHADOW_TABLES_ONLY"
 That run should execute the multi-window shadow validation, compare
 candidate/current/shadow where overlap exists, validate duplicate/null keys,
 and keep watermarks unadvanced.
+
+## Stage 30C-5 Handoff
+
+Stage 30C-5 separates watermark advancement from the non-contiguous Stage 30C-4
+validation windows. The A/B/C validation windows remain parity evidence only;
+they must not advance source-specific watermarks because they do not cover every
+CDF version up to the sampled end versions. Notebook 19 performs the contiguous
+watermark preflight.

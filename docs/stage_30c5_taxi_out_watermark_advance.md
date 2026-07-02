@@ -63,6 +63,36 @@ outside the code:
 - insert initial source-specific watermark rows only after that confirmation;
 - do not infer baseline versions from validation windows.
 
+## Bootstrap Preflight
+
+Stage 30C-5b adds a separate read-only preflight notebook:
+`notebooks/20_stage30c5b_taxi_out_watermark_bootstrap_preflight.py`.
+
+Defaults are safe:
+
+- `RUN_BOOTSTRAP_PREFLIGHT = False`;
+- `ALLOW_WATERMARK_BOOTSTRAP = False`;
+- `DRY_RUN_ONLY = True`.
+
+The preflight does not write bootstrap rows and does not advance watermarks. It
+only inspects retained Delta history for:
+
+- the dev shadow table
+  `panda_silver_dev.ml_ops.stage30c_ft_airport_daily_taxi_out_shadow`;
+- `panda_silver_prod.occ_ops.netline___schedops__leg`;
+- `panda_silver_prod.occ_ops.netline___schedops__leg_times`;
+- the current dev watermark table schema and rows, if present.
+
+The candidate baseline logic uses the earliest shadow table history timestamp
+as the shadow baseline timestamp, then selects each source table version at or
+immediately before that timestamp. It also displays the latest shadow history
+operation for context.
+
+The output is candidate-only, not authoritative. It must be reviewed by a
+human before any separate gated bootstrap insert is considered. The preflight
+must not infer baseline versions from Stage 30C-4 validation windows, latest
+source versions, or any non-contiguous validation sample.
+
 ## Schema Migration
 
 Earlier Stage 30C-1 dev watermark tables may exist with the core watermark

@@ -9,6 +9,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "src" / "ml_project" / "stage30c_taxi_out_watermark.py"
 NOTEBOOK_PATH = REPO_ROOT / "notebooks" / "19_stage30c5_taxi_out_watermark_advance.py"
+BOOTSTRAP_PREFLIGHT_PATH = (
+    REPO_ROOT / "notebooks" / "20_stage30c5b_taxi_out_watermark_bootstrap_preflight.py"
+)
 DOC_PATH = REPO_ROOT / "docs" / "stage_30c5_taxi_out_watermark_advance.md"
 RUNBOOK_PATH = REPO_ROOT / "docs" / "stage_30c2_taxi_out_job_runbook.md"
 JOBIZATION_PATH = REPO_ROOT / "docs" / "stage_30c4_taxi_out_shadow_jobization.md"
@@ -50,6 +53,7 @@ def _has_write_target(source: str, table_name: str) -> bool:
 def test_stage_30c5_files_exist():
     assert MODULE_PATH.exists()
     assert NOTEBOOK_PATH.exists()
+    assert BOOTSTRAP_PREFLIGHT_PATH.exists()
     assert DOC_PATH.exists()
 
 
@@ -271,6 +275,45 @@ def test_source_specific_advance_rows_include_both_sources_and_no_global_waterma
     assert "GLOBAL_WATERMARK" not in module_source
 
 
+def test_bootstrap_candidate_uses_source_version_at_or_before_shadow_baseline():
+    shadow_history = [
+        {"version": 0, "timestamp": "2026-07-01 10:00:00", "operation": "CREATE TABLE"},
+        {"version": 1, "timestamp": "2026-07-01 11:00:00", "operation": "WRITE"},
+    ]
+    source_history = [
+        {"version": 99, "timestamp": "2026-07-01 09:59:00", "operation": "WRITE"},
+        {"version": 100, "timestamp": "2026-07-01 10:00:00", "operation": "WRITE"},
+        {"version": 101, "timestamp": "2026-07-01 10:01:00", "operation": "WRITE"},
+    ]
+
+    baseline = watermark.earliest_delta_history_entry(shadow_history)
+    latest_shadow = watermark.latest_delta_history_entry(shadow_history)
+    candidate = watermark.build_bootstrap_version_candidate(
+        source_alias="leg",
+        source_history_rows=source_history,
+        shadow_baseline_timestamp=baseline["timestamp"],
+    )
+
+    assert baseline["version"] == 0
+    assert latest_shadow["version"] == 1
+    assert candidate.candidate_version == 100
+    assert candidate.candidate_timestamp == "2026-07-01 10:00:00"
+    assert candidate.status == watermark.BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY
+
+
+def test_bootstrap_candidate_is_missing_when_no_source_history_precedes_baseline():
+    candidate = watermark.build_bootstrap_version_candidate(
+        source_alias="leg_times",
+        source_history_rows=[
+            {"version": 1, "timestamp": "2026-07-01 10:01:00", "operation": "WRITE"},
+        ],
+        shadow_baseline_timestamp="2026-07-01 10:00:00",
+    )
+
+    assert candidate.candidate_version is None
+    assert candidate.status == watermark.BOOTSTRAP_PREFLIGHT_MISSING_CANDIDATE
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -350,6 +393,58 @@ def test_stage_30c5_notebook_has_no_stream_or_forbidden_mutation_paths():
     assert not _has_write_target(source, CURRENT_MV)
     assert SHADOW_TABLE in source
     assert WATERMARK_TABLE in source
+
+
+def test_stage_30c5b_bootstrap_preflight_is_read_only_candidate_output():
+    source = _read(BOOTSTRAP_PREFLIGHT_PATH)
+
+    assert "RUN_BOOTSTRAP_PREFLIGHT = False" in source
+    assert "ALLOW_WATERMARK_BOOTSTRAP = False" in source
+    assert "DRY_RUN_ONLY = True" in source
+    assert "candidate_only_requires_human_confirmation" in source
+    assert "CANDIDATE ONLY - requires human confirmation." in source
+    assert "shadow_earliest_history_operation" in source
+    assert "shadow_latest_history_operation" in source
+    assert "candidate_bootstrap_versions" in source
+    assert "current_watermark_rows" in source
+    assert "current_watermark_schema" in source
+    assert "Only after confirming these baseline versions" in source
+
+    for forbidden in (
+        "MERGE INTO",
+        "INSERT INTO",
+        "ALTER TABLE",
+        "CREATE TABLE",
+        "DROP TABLE",
+        "DELETE FROM",
+        "UPDATE ",
+        ".write",
+        "saveAsTable",
+        "insertInto",
+        ".toTable",
+    ):
+        assert forbidden not in source
+    assert "readStream" not in source
+    assert "writeStream" not in source
+    assert "foreachBatch" not in source
+    assert "foreach_batch" not in source
+    assert "ALLOW_WATERMARK_ADVANCE" not in source
+    assert CURRENT_MV not in source
+    for source_table in SOURCE_TABLES:
+        assert source_table in source
+        assert not _has_write_target(source, source_table)
+    assert SHADOW_TABLE in source
+    assert WATERMARK_TABLE in source
+    assert not _has_write_target(source, SHADOW_TABLE)
+    assert not _has_write_target(source, WATERMARK_TABLE)
+
+
+def test_stage_30c5b_bootstrap_preflight_does_not_use_validation_windows_as_baseline():
+    source = _read(BOOTSTRAP_PREFLIGHT_PATH)
+
+    assert "Stage 30C-4" not in source
+    for validation_window_version in ("34600", "34620", "34680", "34700"):
+        assert validation_window_version not in source
 
 
 def test_stage_30c5_docs_cover_watermark_safety_and_bootstrap():

@@ -34,6 +34,8 @@ WATERMARK_BLOCKED_MISSING_SOURCE = "watermark_blocked_missing_source"
 WATERMARK_BLOCKED_VALIDATION_FAILED = "watermark_blocked_validation_failed"
 WATERMARK_SCHEMA_INCOMPATIBLE = "watermark_schema_incompatible"
 WATERMARK_ADVANCE_PASS = "watermark_advance_pass"
+BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY = "candidate_only_requires_human_confirmation"
+BOOTSTRAP_PREFLIGHT_MISSING_CANDIDATE = "candidate_missing_requires_manual_review"
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,114 @@ class SourceWindow:
     @property
     def has_new_versions(self) -> bool:
         return self.starting_version is not None and self.ending_version is not None
+
+
+@dataclass(frozen=True)
+class BootstrapVersionCandidate:
+    source_alias: str
+    candidate_version: int | None
+    candidate_timestamp: str | None
+    candidate_operation: str | None
+    shadow_baseline_timestamp: str
+    status: str
+
+
+def _mapping_get(row: Mapping[str, Any], key: str) -> Any:
+    return row.get(key)
+
+
+def _coerce_history_timestamp(value: Any) -> datetime:
+    if value is None:
+        raise ValueError("Delta history row is missing timestamp.")
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, str):
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError(f"Unsupported Delta history timestamp type: {type(value).__name__}")
+    return timestamp.replace(tzinfo=None)
+
+
+def _history_sort_key(row: Mapping[str, Any]) -> tuple[datetime, int]:
+    version = _mapping_get(row, "version")
+    if version is None:
+        raise ValueError("Delta history row is missing version.")
+    return (_coerce_history_timestamp(_mapping_get(row, "timestamp")), int(version))
+
+
+def summarize_delta_history_entry(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if row is None:
+        return {
+            "version": None,
+            "timestamp": None,
+            "operation": None,
+        }
+    timestamp = _coerce_history_timestamp(_mapping_get(row, "timestamp"))
+    return {
+        "version": int(_mapping_get(row, "version")),
+        "timestamp": timestamp.isoformat(sep=" "),
+        "operation": _mapping_get(row, "operation"),
+    }
+
+
+def earliest_delta_history_entry(history_rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = tuple(history_rows)
+    if not rows:
+        raise ValueError("Delta history is empty; cannot identify a shadow baseline timestamp.")
+    return dict(min(rows, key=_history_sort_key))
+
+
+def latest_delta_history_entry(history_rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = tuple(history_rows)
+    if not rows:
+        raise ValueError("Delta history is empty; cannot identify the latest table operation.")
+    return dict(max(rows, key=_history_sort_key))
+
+
+def source_history_entry_at_or_before_timestamp(
+    history_rows: Iterable[Mapping[str, Any]],
+    baseline_timestamp: Any,
+) -> dict[str, Any] | None:
+    baseline = _coerce_history_timestamp(baseline_timestamp)
+    eligible = [
+        row
+        for row in history_rows
+        if _coerce_history_timestamp(_mapping_get(row, "timestamp")) <= baseline
+    ]
+    if not eligible:
+        return None
+    return dict(max(eligible, key=_history_sort_key))
+
+
+def build_bootstrap_version_candidate(
+    *,
+    source_alias: str,
+    source_history_rows: Iterable[Mapping[str, Any]],
+    shadow_baseline_timestamp: Any,
+) -> BootstrapVersionCandidate:
+    if source_alias not in SOURCE_ALIASES:
+        raise ValueError(f"Unsupported source alias: {source_alias!r}")
+    baseline = _coerce_history_timestamp(shadow_baseline_timestamp)
+    candidate = source_history_entry_at_or_before_timestamp(source_history_rows, baseline)
+    if candidate is None:
+        return BootstrapVersionCandidate(
+            source_alias=source_alias,
+            candidate_version=None,
+            candidate_timestamp=None,
+            candidate_operation=None,
+            shadow_baseline_timestamp=baseline.isoformat(sep=" "),
+            status=BOOTSTRAP_PREFLIGHT_MISSING_CANDIDATE,
+        )
+
+    summary = summarize_delta_history_entry(candidate)
+    return BootstrapVersionCandidate(
+        source_alias=source_alias,
+        candidate_version=summary["version"],
+        candidate_timestamp=summary["timestamp"],
+        candidate_operation=summary["operation"],
+        shadow_baseline_timestamp=baseline.isoformat(sep=" "),
+        status=BOOTSTRAP_PREFLIGHT_CANDIDATE_ONLY,
+    )
 
 
 def _quote_identifier(identifier: str) -> str:

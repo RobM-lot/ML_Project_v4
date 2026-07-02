@@ -75,3 +75,12 @@ Capture and alert on:
 - No global watermark.
 - No EMA implementation in this stage.
 - Watermark advancement only after successful merge and post-merge validation.
+
+## Stage 30C-4 Handoff
+
+Stage 30C-4 adds `notebooks/18_stage30c4_taxi_out_shadow_job.py` as the
+job-style runner for this runbook. It supports multiple explicit CDF windows,
+`VALIDATION_WINDOWS_JSON` for Job parameters, and overlap-aware validation so
+caps cannot select only affected keys with zero candidate/current overlap. The
+runner remains separate from the Lakeflow pipeline definition and keeps
+watermark advancement disabled by default.

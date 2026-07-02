@@ -60,6 +60,7 @@ def test_stage_30c5_notebook_defaults_are_safe():
     assert "DRY_RUN_ONLY = True" in source
     assert "ALLOW_SHADOW_MERGE = False" in source
     assert "ALLOW_WATERMARK_ADVANCE = False" in source
+    assert "ALLOW_WATERMARK_SCHEMA_MIGRATION = False" in source
     assert "ALLOW_WATERMARK_BOOTSTRAP = False" in source
     assert 'WRITE_CONFIRMATION = ""' in source
     assert 'REQUIRED_WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_DEV_SHADOW_TABLES_ONLY"' in source
@@ -78,6 +79,99 @@ def test_watermark_schema_requires_explicit_column_names():
                 "updated_at",
             ]
         )
+
+
+def test_watermark_schema_migration_allows_only_additive_metadata_columns():
+    missing = watermark.detect_missing_watermark_columns(
+        [
+            "source_alias",
+            "last_processed_version",
+            "last_processed_timestamp",
+            "updated_at",
+        ]
+    )
+    assert missing == ("updated_by_stage", "run_id")
+
+    assert watermark.validate_watermark_schema_migration_gates(
+        table_name=WATERMARK_TABLE,
+        missing_columns=missing,
+        allow_schema_migration=True,
+        dry_run_only=False,
+        write_confirmation=watermark.REQUIRED_WRITE_CONFIRMATION,
+    )
+
+    sql = watermark.build_watermark_schema_migration_sql(
+        table_name=WATERMARK_TABLE,
+        missing_columns=missing,
+    )
+    assert "ALTER TABLE `panda_silver_dev`.`ml_ops`.`stage30c_taxi_out_watermarks`" in sql
+    assert "ADD COLUMNS" in sql
+    assert "`updated_by_stage` STRING" in sql
+    assert "`run_id` STRING" in sql
+    assert CURRENT_MV not in sql
+    for source_table in SOURCE_TABLES:
+        assert source_table not in sql
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"allow_schema_migration": False}, "ALLOW_WATERMARK_SCHEMA_MIGRATION"),
+        ({"dry_run_only": True}, "DRY_RUN_ONLY=False"),
+        ({"write_confirmation": ""}, "confirmation"),
+    ],
+)
+def test_watermark_schema_migration_requires_explicit_write_gates(kwargs, message):
+    params = {
+        "table_name": WATERMARK_TABLE,
+        "missing_columns": ("updated_by_stage", "run_id"),
+        "allow_schema_migration": True,
+        "dry_run_only": False,
+        "write_confirmation": watermark.REQUIRED_WRITE_CONFIRMATION,
+    }
+    params.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        watermark.validate_watermark_schema_migration_gates(**params)
+
+
+def test_watermark_schema_migration_blocks_core_or_unknown_columns():
+    with pytest.raises(ValueError, match="core watermark columns"):
+        watermark.validate_watermark_schema_migration_gates(
+            table_name=WATERMARK_TABLE,
+            missing_columns=("source_alias", "updated_by_stage"),
+            allow_schema_migration=True,
+            dry_run_only=False,
+            write_confirmation=watermark.REQUIRED_WRITE_CONFIRMATION,
+        )
+
+    with pytest.raises(ValueError, match="only additive metadata columns"):
+        watermark.validate_watermark_schema_migration_gates(
+            table_name=WATERMARK_TABLE,
+            missing_columns=("unexpected_column",),
+            allow_schema_migration=True,
+            dry_run_only=False,
+            write_confirmation=watermark.REQUIRED_WRITE_CONFIRMATION,
+        )
+
+    with pytest.raises(ValueError, match="dev control table"):
+        watermark.build_watermark_schema_migration_sql(
+            table_name=CURRENT_MV,
+            missing_columns=("updated_by_stage",),
+        )
+
+
+def test_notebook_revalidates_schema_after_optional_migration_before_continuing():
+    source = _read(NOTEBOOK_PATH)
+
+    migration_pos = source.index("missing_watermark_columns = detect_missing_watermark_columns")
+    sql_pos = source.index("spark.sql(migration_sql)")
+    reread_pos = source.index("watermark_df = spark.table(WATERMARK_TABLE)", sql_pos)
+    validate_pos = source.index("validate_watermark_schema(watermark_df.columns)", reread_pos)
+    rows_pos = source.index("watermark_rows = [row.asDict()")
+    latest_pos = source.index("latest_available_versions = {")
+
+    assert migration_pos < sql_pos < reread_pos < validate_pos < rows_pos < latest_pos
 
 
 def test_missing_watermark_rows_trigger_bootstrap_required_status():
@@ -270,6 +364,9 @@ def test_stage_30c5_docs_cover_watermark_safety_and_bootstrap():
         "non-contiguous samples",
         "source-specific",
         "Bootstrap Requirement",
+        "Earlier Stage 30C-1 dev watermark tables",
+        "ALLOW_WATERMARK_SCHEMA_MIGRATION = False",
+        "additive schema migration path",
         "watermark_bootstrap_required",
         "do not infer baseline versions from validation windows",
         "contiguous",

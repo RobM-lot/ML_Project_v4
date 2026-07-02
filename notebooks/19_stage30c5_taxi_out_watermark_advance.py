@@ -24,6 +24,7 @@ DRY_RUN_ONLY = True
 
 ALLOW_SHADOW_MERGE = False
 ALLOW_WATERMARK_ADVANCE = False
+ALLOW_WATERMARK_SCHEMA_MIGRATION = False
 
 WRITE_CONFIRMATION = ""
 REQUIRED_WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_DEV_SHADOW_TABLES_ONLY"
@@ -91,6 +92,7 @@ CONFIG_ROWS = [
     ("DRY_RUN_ONLY", str(DRY_RUN_ONLY)),
     ("ALLOW_SHADOW_MERGE", str(ALLOW_SHADOW_MERGE)),
     ("ALLOW_WATERMARK_ADVANCE", str(ALLOW_WATERMARK_ADVANCE)),
+    ("ALLOW_WATERMARK_SCHEMA_MIGRATION", str(ALLOW_WATERMARK_SCHEMA_MIGRATION)),
     ("WRITE_CONFIRMATION_PRESENT", str(bool(WRITE_CONFIRMATION))),
     ("SOURCE_VERSION_MODE", SOURCE_VERSION_MODE),
     ("REQUIRE_CONTIGUOUS_SOURCE_WINDOWS", str(REQUIRE_CONTIGUOUS_SOURCE_WINDOWS)),
@@ -194,15 +196,18 @@ from ml_project.stage30c_taxi_out_watermark import (  # noqa: E402
     SOURCE_ALIASES,
     SourceWindow,
     build_next_source_windows_from_watermarks,
+    build_watermark_schema_migration_sql,
     build_watermark_advance_merge_sql,
     build_watermark_advance_rows,
     classify_watermark_run_status,
+    detect_missing_watermark_columns,
     summarize_watermark_run,
     validate_contiguous_source_window,
     validate_explicit_window_against_watermark,
     validate_watermark_advance_gates,
     validate_watermark_rows,
     validate_watermark_schema,
+    validate_watermark_schema_migration_gates,
 )
 
 print(f"Project root: {PROJECT_ROOT}")
@@ -217,7 +222,12 @@ if SOURCE_VERSION_MODE not in {"watermark", "explicit"}:
     raise ValueError("SOURCE_VERSION_MODE must be 'watermark' or 'explicit'.")
 if (ALLOW_SHADOW_MERGE or ALLOW_WATERMARK_ADVANCE) and DRY_RUN_ONLY:
     raise ValueError("Write flags require DRY_RUN_ONLY=False.")
-if (ALLOW_SHADOW_MERGE or ALLOW_WATERMARK_ADVANCE or ALLOW_WATERMARK_BOOTSTRAP) and (
+if (
+    ALLOW_SHADOW_MERGE
+    or ALLOW_WATERMARK_ADVANCE
+    or ALLOW_WATERMARK_BOOTSTRAP
+    or ALLOW_WATERMARK_SCHEMA_MIGRATION
+) and (
     WRITE_CONFIRMATION != REQUIRED_WRITE_CONFIRMATION
 ):
     raise ValueError("Write-capable Stage 30C-5 modes require the exact dev-shadow write confirmation string.")
@@ -239,6 +249,27 @@ if not watermark_table_exists:
         dbutils.notebook.exit("watermark_bootstrap_required")
 
 watermark_df = spark.table(WATERMARK_TABLE)
+missing_watermark_columns = detect_missing_watermark_columns(watermark_df.columns)
+if missing_watermark_columns:
+    validate_watermark_schema_migration_gates(
+        table_name=WATERMARK_TABLE,
+        missing_columns=missing_watermark_columns,
+        allow_schema_migration=ALLOW_WATERMARK_SCHEMA_MIGRATION,
+        dry_run_only=DRY_RUN_ONLY,
+        write_confirmation=WRITE_CONFIRMATION,
+        required_write_confirmation=REQUIRED_WRITE_CONFIRMATION,
+    )
+    migration_sql = build_watermark_schema_migration_sql(
+        table_name=WATERMARK_TABLE,
+        missing_columns=missing_watermark_columns,
+    )
+    print("Executing additive dev watermark schema migration.")
+    print(migration_sql)
+    spark.sql(migration_sql)
+    watermark_df = spark.table(WATERMARK_TABLE)
+
+# Schema validation is intentionally re-run after any migration before source windows,
+# shadow merge, or watermark advancement can continue.
 validate_watermark_schema(watermark_df.columns)
 watermark_rows = [row.asDict() for row in watermark_df.where(F.col("source_alias").isin(*SOURCE_ALIASES)).collect()]
 

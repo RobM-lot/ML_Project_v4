@@ -13,6 +13,7 @@ Defaults are safe:
 - `DRY_RUN_ONLY = True`;
 - `ALLOW_SHADOW_MERGE = False`;
 - `ALLOW_WATERMARK_ADVANCE = False`;
+- `ALLOW_WATERMARK_SCHEMA_MIGRATION = False`;
 - `ALLOW_WATERMARK_BOOTSTRAP = False`;
 - empty `WRITE_CONFIRMATION`.
 
@@ -61,6 +62,48 @@ outside the code:
   versions;
 - insert initial source-specific watermark rows only after that confirmation;
 - do not infer baseline versions from validation windows.
+
+## Schema Migration
+
+Earlier Stage 30C-1 dev watermark tables may exist with the core watermark
+columns but without the Stage 30C-5 metadata columns `updated_by_stage` and
+`run_id`. Notebook 19 handles that case with an explicitly gated, dev-only,
+additive schema migration path.
+
+The default remains blocked:
+
+- `ALLOW_WATERMARK_SCHEMA_MIGRATION = False`;
+- `DRY_RUN_ONLY = True`;
+- empty `WRITE_CONFIRMATION`.
+
+Migration is allowed only when all of these are true:
+
+- `ALLOW_WATERMARK_SCHEMA_MIGRATION = True`;
+- `DRY_RUN_ONLY = False`;
+- `WRITE_CONFIRMATION` equals the required dev-shadow confirmation string;
+- the target is exactly
+  `panda_silver_dev.ml_ops.stage30c_taxi_out_watermarks`;
+- missing columns are only additive metadata columns such as
+  `updated_by_stage` and `run_id`.
+
+The migration SQL is additive only:
+
+```sql
+ALTER TABLE `panda_silver_dev`.`ml_ops`.`stage30c_taxi_out_watermarks`
+ADD COLUMNS (
+  `updated_by_stage` STRING,
+  `run_id` STRING
+)
+```
+
+If core columns are missing, such as `source_alias`,
+`last_processed_version`, `last_processed_timestamp`, or `updated_at`, the
+runner does not auto-migrate. It returns a clear incompatible/bootstrap status
+instead of inferring alternate column names.
+
+After any migration, notebook 19 re-reads the watermark table and runs schema
+validation again before reading source windows, running a shadow merge, or
+advancing watermarks.
 
 ## Source Window Modes
 

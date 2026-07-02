@@ -10,11 +10,18 @@ DEFAULT_WATERMARK_TABLE = "panda_silver_dev.ml_ops.stage30c_taxi_out_watermarks"
 DEFAULT_STAGE_NAME = "stage30c5_taxi_out_watermark_advance"
 REQUIRED_WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_DEV_SHADOW_TABLES_ONLY"
 
-REQUIRED_WATERMARK_COLUMNS = (
+CORE_WATERMARK_COLUMNS = (
     "source_alias",
     "last_processed_version",
     "last_processed_timestamp",
     "updated_at",
+)
+ADDITIVE_WATERMARK_METADATA_COLUMNS = {
+    "updated_by_stage": "STRING",
+    "run_id": "STRING",
+}
+REQUIRED_WATERMARK_COLUMNS = (
+    *CORE_WATERMARK_COLUMNS,
     "updated_by_stage",
     "run_id",
 )
@@ -25,6 +32,7 @@ WATERMARK_BOOTSTRAP_REQUIRED = "watermark_bootstrap_required"
 WATERMARK_BLOCKED_NON_CONTIGUOUS = "watermark_blocked_non_contiguous"
 WATERMARK_BLOCKED_MISSING_SOURCE = "watermark_blocked_missing_source"
 WATERMARK_BLOCKED_VALIDATION_FAILED = "watermark_blocked_validation_failed"
+WATERMARK_SCHEMA_INCOMPATIBLE = "watermark_schema_incompatible"
 WATERMARK_ADVANCE_PASS = "watermark_advance_pass"
 
 
@@ -65,15 +73,93 @@ def _sql_timestamp(value: str | None) -> str:
     return f"CAST('{escaped}' AS TIMESTAMP)"
 
 
-def validate_watermark_schema(columns: Iterable[str]) -> bool:
+def validate_dev_watermark_table_name(table_name: str) -> bool:
+    if table_name != DEFAULT_WATERMARK_TABLE:
+        raise ValueError(
+            "Watermark schema migration can only target the dev control table "
+            f"{DEFAULT_WATERMARK_TABLE}. Got: {table_name}"
+        )
+    return True
+
+
+def detect_missing_watermark_columns(columns: Iterable[str]) -> tuple[str, ...]:
     available = set(columns)
-    missing = [column for column in REQUIRED_WATERMARK_COLUMNS if column not in available]
+    return tuple(column for column in REQUIRED_WATERMARK_COLUMNS if column not in available)
+
+
+def validate_watermark_schema(columns: Iterable[str]) -> bool:
+    missing = list(detect_missing_watermark_columns(columns))
     if missing:
         raise ValueError(
             "Watermark table schema is missing required columns. "
             f"Missing={missing}. Do not silently infer alternate column names."
         )
     return True
+
+
+def validate_watermark_schema_migration_gates(
+    *,
+    table_name: str,
+    missing_columns: Iterable[str],
+    allow_schema_migration: bool,
+    dry_run_only: bool,
+    write_confirmation: str,
+    required_write_confirmation: str = REQUIRED_WRITE_CONFIRMATION,
+) -> bool:
+    validate_dev_watermark_table_name(table_name)
+    missing = tuple(missing_columns)
+    if not missing:
+        return True
+
+    core_missing = [column for column in missing if column in CORE_WATERMARK_COLUMNS]
+    if core_missing:
+        raise ValueError(
+            "watermark_schema_incompatible: core watermark columns are missing and cannot be auto-migrated. "
+            f"Missing core columns={core_missing}."
+        )
+
+    unsupported = [column for column in missing if column not in ADDITIVE_WATERMARK_METADATA_COLUMNS]
+    if unsupported:
+        raise ValueError(
+            "watermark_schema_incompatible: only additive metadata columns can be auto-migrated. "
+            f"Unsupported missing columns={unsupported}."
+        )
+
+    if not allow_schema_migration:
+        raise ValueError(
+            "Watermark schema migration is required but ALLOW_WATERMARK_SCHEMA_MIGRATION is False."
+        )
+    if dry_run_only:
+        raise ValueError("Watermark schema migration requires DRY_RUN_ONLY=False.")
+    if write_confirmation != required_write_confirmation:
+        raise ValueError("Watermark schema migration requires the exact dev-shadow write confirmation string.")
+    return True
+
+
+def build_watermark_schema_migration_sql(
+    *,
+    table_name: str = DEFAULT_WATERMARK_TABLE,
+    missing_columns: Iterable[str],
+) -> str:
+    validate_dev_watermark_table_name(table_name)
+    missing = tuple(missing_columns)
+    if not missing:
+        raise ValueError("No missing watermark columns were provided for schema migration.")
+    validate_watermark_schema_migration_gates(
+        table_name=table_name,
+        missing_columns=missing,
+        allow_schema_migration=True,
+        dry_run_only=False,
+        write_confirmation=REQUIRED_WRITE_CONFIRMATION,
+    )
+    column_specs = ",\n  ".join(
+        f"{_quote_identifier(column)} {ADDITIVE_WATERMARK_METADATA_COLUMNS[column]}"
+        for column in missing
+    )
+    return f"""ALTER TABLE {quote_table_name(table_name)}
+ADD COLUMNS (
+  {column_specs}
+)"""
 
 
 def validate_watermark_rows(
